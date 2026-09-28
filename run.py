@@ -3,7 +3,7 @@ from mcppro import MCPServer, api_key_auth
 from joyverse.profile import get_profile, update_profile
 from joyverse.memory import get_memory, add_memory_trait, update_focus
 from joyverse.data import get_data, update_data
-
+from joyverse.prompts import USER_DATA 
 from joyverse.auth import jwt_auth  # NEW
 
 server = MCPServer(
