@@ -4,8 +4,11 @@ from joyverse.config import r2_client, BUCKET_NAME, get_profile_key
 def get_profile(user: dict) -> str:
     """Reads the user profile from R2."""
     username = user["username"]
-    key = get_profile_key(username)
-    
+    try:
+        key = get_profile_key(username)
+    except ValueError as e:
+        return json.dumps({"error": f"Invalid username: {e}"})
+
     try:
         response = r2_client.get_object(Bucket=BUCKET_NAME, Key=key)
         return response["Body"].read().decode("utf-8")
@@ -17,8 +20,11 @@ def get_profile(user: dict) -> str:
 def update_profile(field: str, value: str, user: dict) -> str:
     """Updates a specific field in the profile on R2."""
     username = user["username"]
-    key = get_profile_key(username)
-    
+    try:
+        key = get_profile_key(username)
+    except ValueError as e:
+        return f"Error: Invalid username: {e}"
+
     try:
         response = r2_client.get_object(Bucket=BUCKET_NAME, Key=key)
         content = response["Body"].read().decode("utf-8")

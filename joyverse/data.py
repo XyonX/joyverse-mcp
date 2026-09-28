@@ -3,7 +3,10 @@ from joyverse.config import r2_client, BUCKET_NAME, get_data_key
 
 def get_data(topic: str, user: dict) -> str:
     username = user["username"]
-    key = get_data_key(username, topic)
+    try:
+        key = get_data_key(username, topic)
+    except ValueError as e:
+        return json.dumps({"error": f"Invalid topic: {e}"})
     try:
         response = r2_client.get_object(Bucket=BUCKET_NAME, Key=key)
         return response["Body"].read().decode("utf-8")
@@ -14,7 +17,10 @@ def get_data(topic: str, user: dict) -> str:
 
 def update_data(topic: str, data: str, user: dict) -> str:
     username = user["username"]
-    key = get_data_key(username, topic)
+    try:
+        key = get_data_key(username, topic)
+    except ValueError as e:
+        return f"Error: Invalid topic: {e}"
     try:
         parsed = json.loads(data)
         r2_client.put_object(

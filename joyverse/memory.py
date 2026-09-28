@@ -1,3 +1,4 @@
+import copy
 import json
 from datetime import datetime
 from joyverse.config import r2_client, BUCKET_NAME, get_memory_key
@@ -17,8 +18,11 @@ def _load_memory(username: str) -> dict:
         return json.loads(response["Body"].read().decode("utf-8"))
     except Exception as e:
         if "NoSuchKey" in str(e):
-            _save_memory(username, DEFAULT_MEMORY)
-            return DEFAULT_MEMORY
+            # Deep-copy: returning the module-level dict itself would let one
+            # user's in-place mutations leak into every other user's memory.
+            fresh = copy.deepcopy(DEFAULT_MEMORY)
+            _save_memory(username, fresh)
+            return fresh
         raise e
 
 def _save_memory(username: str, data: dict):

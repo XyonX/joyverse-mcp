@@ -24,14 +24,25 @@ r2_client = boto3.client(
 # DYNAMIC KEY BUILDERS (Multi-user)
 # ==========================================
 
+def _safe_segment(value: str) -> str:
+    """Rejects path-traversal attempts in a user-supplied key segment.
+
+    Mirrors the check in jwt_auth: without it, a topic like '../../other'
+    would build an R2 key escaping the user's own users/<name>/ prefix.
+    """
+    if "/" in value or "\\" in value or ".." in value or value.strip() == "":
+        raise ValueError(f"Invalid key segment: {value!r}")
+    return value
+
+
 def get_profile_key(username: str) -> str:
-    return f"users/{username}/profile.md"
+    return f"users/{_safe_segment(username)}/profile.md"
 
 def get_bio_key(username: str) -> str:
-    return f"users/{username}/bio.md"
+    return f"users/{_safe_segment(username)}/bio.md"
 
 def get_memory_key(username: str) -> str:
-    return f"users/{username}/memory.json"
+    return f"users/{_safe_segment(username)}/memory.json"
 
 def get_data_key(username: str, topic: str) -> str:
-    return f"users/{username}/data/{topic}/progress.json"
+    return f"users/{_safe_segment(username)}/data/{_safe_segment(topic)}/progress.json"
