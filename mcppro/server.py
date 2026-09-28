@@ -13,10 +13,11 @@ class MCPServer:
     Wraps FastAPI and provides a simple decorator-based API.
     """
     
-    def __init__(self, name: str, version: str = "1.0.0", auth: Callable = None):
+    def __init__(self, name: str, version: str = "1.0.0", auth: Callable = None, instructions: str = ""):
         self.name = name
         self.version = version
-        
+        self.instructions = instructions or ""
+         
         # Internal registries
         self._tool_functions: Dict[str, Callable] = {}
         self._tool_schemas: list = []
@@ -57,7 +58,9 @@ class MCPServer:
                     server_name=self.name,
                     server_version=self.version,
                     tool_schemas=self._tool_schemas,
-                    tool_functions=self._tool_functions
+                    tool_functions=self._tool_functions,
+                    instructions=self.instructions,
+                    user_context=user
                 ):
                     yield sse_chunk
             

@@ -13,7 +13,7 @@ def jwt_auth(request: Request) -> dict:
     token = auth_header.replace("Bearer ", "")
     
     if not token:
-        raise HTTPException(status_code=40=401, detail="Missing authentication token")
+        raise HTTPException(status_code=401, detail="Missing authentication token")
     
     try:
         payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])

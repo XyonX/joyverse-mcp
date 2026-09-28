@@ -10,12 +10,19 @@ async def route_request(
     server_name: str,
     server_version: str,
     tool_schemas: list,
-    tool_functions: dict
+    tool_functions: dict,
+    instructions: str = "",
+    user_context: dict = None
 ) -> AsyncGenerator[str, None]:
     """
     Routes a JSON-RPC method to the appropriate handler.
     Yields SSE-formatted strings.
+
+    user_context is the dict returned by the auth strategy, injected into any
+    tool function that declares a 'user' parameter.
     """
+    if user_context is None:
+        user_context = {}
 
     # ==========================================
     # A. LIFECYCLE: Initialize
@@ -29,6 +36,8 @@ async def route_request(
                 version=server_version
             ).model_dump()
         }
+        if instructions:
+            result["instructions"] = instructions
         payload = transport.build_jsonrpc_response(req_id, result)
         yield transport.format_sse(payload)
 
@@ -83,6 +92,10 @@ async def route_request(
                         content=[MCPContent(type="text", text=f"Server Error: {str(e)}")],
                         isError=True
                     )
+
+            payload = transport.build_jsonrpc_response(req_id, result.model_dump())
+            yield transport.format_sse(payload)
+
     # ==========================================
     # E. FALLBACK: Method Not Found
     # ==========================================

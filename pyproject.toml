@@ -12,3 +12,11 @@ dependencies = [
     "python-dotenv>=1.0.0",
     "PyJWT>=2.8.0",
 ]
+
+[build-system]
+requires = ["setuptools>=64", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["mcppro", "joyverse"]
+py-modules = ["run"]

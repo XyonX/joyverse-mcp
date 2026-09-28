@@ -1,4 +1,4 @@
-from mcppro import MCPServer, api_key_auth
+from mcppro import MCPServer
 
 from joyverse.profile import get_profile, update_profile
 from joyverse.memory import get_memory, add_memory_trait, update_focus
