@@ -1,0 +1,57 @@
+# Git
+.git
+.gitignore
+
+# Python
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.coverage
+*.cover
+*.egg-info
+dist
+build
+
+# Virtual environments
+.venv
+venv
+env
+ENV
+
+# IDE
+.vscode
+.idea
+*.swp
+*.swo
+
+# Environment files
+.env
+.env.local
+.env.*.local
+
+# Test outputs
+htmlcov
+.tox
+
+# Docker
+Dockerfile
+.dockerignore
+docker-compose.yml
+docker-compose.override.yml
+
+# Logs
+*.log
+logs/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# MCP client (not needed in server image)
+mcp_client/
+
+# Documentation
+*.md
+!README.md
