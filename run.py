@@ -1,6 +1,7 @@
 from mcppro import MCPServer
 
 from joyverse.profile import get_profile, update_profile
+from joyverse.bio import get_bio, update_bio
 from joyverse.memory import get_memory, add_memory_trait, update_focus
 from joyverse.data import get_data, update_data
 from joyverse.prompts import USER_DATA 
@@ -16,6 +17,10 @@ server = MCPServer(
 # Profile
 server.tool(description="Get the user's personal profile")(get_profile)
 server.tool(description="Update a field in the user profile")(update_profile)
+
+# Bio
+server.tool(description="Get the user's detailed life narrative")(get_bio)
+server.tool(description="Write or replace a section of the user's bio")(update_bio)
 
 # Memory
 server.tool(description="Get the user's LLM memory model")(get_memory)
