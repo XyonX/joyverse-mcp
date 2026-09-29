@@ -78,7 +78,7 @@ class TestRunSignature:
     def test_accepts_host_and_port(self):
         import inspect
         sig = inspect.signature(MCPServer.run)
-        assert sig.parameters["host"].default == "127.0.0.1"
+        assert sig.parameters["host"].default == "0.0.0.0"
         assert sig.parameters["port"].default == 8000
         assert sig.parameters["reload"].default is False
 
@@ -93,6 +93,20 @@ class TestHttpEndpoint:
         client, _ = client_factory()
         paths = [r.path for r in client.app.routes]
         assert "/mcp" in paths
+
+    def test_health_endpoint_exists(self, client_factory):
+        client, _ = client_factory()
+        paths = [r.path for r in client.app.routes]
+        assert "/health" in paths
+
+    def test_health_endpoint_returns_ok(self, client_factory):
+        client, _ = client_factory()
+        r = client.get("/health")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["status"] == "ok"
+        assert "server" in data
+        assert "version" in data
 
     def test_response_is_an_sse_stream(self, client_factory, sse_rpc):
         client, _ = client_factory()

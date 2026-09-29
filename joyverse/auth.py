@@ -1,8 +1,13 @@
 from fastapi import Request, HTTPException
 import jwt
 import os
+from dotenv import load_dotenv
 
-JWT_SECRET = os.getenv("JWT_SECRET", "dev-secret-change-in-production")
+load_dotenv()
+
+JWT_SECRET = os.getenv("JWT_SECRET")
+if not JWT_SECRET:
+    raise RuntimeError("JWT_SECRET environment variable is required. Set it in .env or environment.")
 
 def jwt_auth(request: Request) -> dict:
     """

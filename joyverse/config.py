@@ -64,4 +64,13 @@ def get_memory_key(username: str) -> str:
     return f"users/{_safe_segment(username)}/memory.json"
 
 def get_data_key(username: str, topic: str) -> str:
-    return f"users/{_safe_segment(username)}/data/{_safe_segment(topic)}/progress.json"
+    # Use topic-specific filename based on known schemas
+    filename_map = {
+        "dsa": "progress.json",
+        "projects": "active.json",
+        "skills": "stack.json",
+        "reading": "list.json",
+        "games": "played.json",
+    }
+    filename = filename_map.get(topic, "progress.json")
+    return f"users/{_safe_segment(username)}/data/{_safe_segment(topic)}/{filename}"

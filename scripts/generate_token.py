@@ -6,7 +6,7 @@ Run it:
     python scripts/generate_token.py
 
 Then give the printed token to your client as:
-    Authorization: Bearer <token>
+    Authorization: Bearer ***
 """
 
 # ============================================================
@@ -44,16 +44,6 @@ from dotenv import load_dotenv
 ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 load_dotenv(ENV_PATH)
 
-# Match the server's fallback exactly.
-DEFAULT_SECRET = "dev-secret-change-in-production"
-
-if JWT_SECRET_OVERRIDE:
-    secret = JWT_SECRET_OVERRIDE
-    source = "JWT_SECRET_OVERRIDE at the top of this script"
-else:
-    secret = os.getenv("JWT_SECRET", DEFAULT_SECRET)
-    source = f"JWT_SECRET in {ENV_PATH.name}" if os.getenv("JWT_SECRET") else "the built-in fallback"
-
 import jwt
 
 
@@ -70,6 +60,16 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+
+    if JWT_SECRET_OVERRIDE:
+        secret = JWT_SECRET_OVERRIDE
+        source = "JWT_SECRET_OVERRIDE at the top of this script"
+    else:
+        secret = os.getenv("JWT_SECRET")
+        if not secret:
+            print("Error: JWT_SECRET is not set. Set it in .env or JWT_SECRET_OVERRIDE.", file=sys.stderr)
+            return 1
+        source = f"JWT_SECRET in {ENV_PATH.name}"
 
     now = int(time.time())
     expires_at = now + (EXPIRES_IN_HOURS * 3600)
@@ -97,17 +97,9 @@ def main() -> int:
     print()
     print("Send it like this:")
     print(f'  curl -X POST http://127.0.0.1:8001/mcp \\')
-    print(f'    -H "Authorization: Bearer {token}" \\')
+    print(f'    -H "Authorization: Bearer ***" \\')
     print('    -H "Content-Type: application/json" \\')
     print('    -d \'{"jsonrpc":"2.0","id":1,"method":"tools/list"}\'')
-
-    if secret == DEFAULT_SECRET:
-        print()
-        print("=" * 70)
-        print("WARNING: this token was signed with the BUILT-IN FALLBACK SECRET.")
-        print("The server will only accept it if JWT_SECRET is also unset in .env.")
-        print("Add a real JWT_SECRET to .env and regenerate.")
-        print("=" * 70)
 
     if EXPIRES_IN_HOURS > 24 * 30:
         print()
