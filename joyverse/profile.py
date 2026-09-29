@@ -65,15 +65,29 @@ def update_profile(field: str, value: str, user: dict) -> str:
 
     if is_section:
         header = f"## {field}"
-        if not any(line.strip() == header for line in lines):
+        start = None
+        for i, line in enumerate(lines):
+            if line.strip() == header:
+                start = i
+                break
+
+        if start is None:
+            # New section: append it at the end.
             while lines and not lines[-1].strip():
                 lines.pop()
             if lines and lines[0].startswith("# "):
                 lines.extend(["", header, ""])
             else:
-                lines = [f"# User Profile", "", header, ""]
-        for vline in value.split("\n"):
-            lines.append(vline)
+                lines = ["# User Profile", "", header, ""]
+            lines.extend(value.split("\n"))
+        else:
+            # Existing section: replace its body, up to the next header.
+            end = len(lines)
+            for j in range(start + 1, len(lines)):
+                if lines[j].strip().startswith("## "):
+                    end = j
+                    break
+            lines = lines[:start + 1] + [""] + value.split("\n") + lines[end:]
         new_content = "\n".join(lines)
         result_msg = f"Updated section '{field}'"
     else:
