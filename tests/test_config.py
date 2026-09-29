@@ -77,3 +77,11 @@ class TestTraversalRegression:
     def test_topics_with_dots_are_allowed(self):
         # "v1.2" has dots but no traversal
         assert get_data_key("joydip", "v1.2").endswith("data/v1.2/progress.json")
+
+    def test_topic_specific_filenames(self):
+        """Test that known topics get their specific filenames."""
+        assert get_data_key("joydip", "dsa") == "users/joydip/data/dsa/progress.json"
+        assert get_data_key("joydip", "projects") == "users/joydip/data/projects/active.json"
+        assert get_data_key("joydip", "skills") == "users/joydip/data/skills/stack.json"
+        assert get_data_key("joydip", "reading") == "users/joydip/data/reading/list.json"
+        assert get_data_key("joydip", "games") == "users/joydip/data/games/played.json"

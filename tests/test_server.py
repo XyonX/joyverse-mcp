@@ -94,6 +94,20 @@ class TestHttpEndpoint:
         paths = [r.path for r in client.app.routes]
         assert "/mcp" in paths
 
+    def test_health_endpoint_exists(self, client_factory):
+        client, _ = client_factory()
+        paths = [r.path for r in client.app.routes]
+        assert "/health" in paths
+
+    def test_health_endpoint_returns_ok(self, client_factory):
+        client, _ = client_factory()
+        r = client.get("/health")
+        assert r.status_code == 200
+        data = r.json()
+        assert data["status"] == "ok"
+        assert "server" in data
+        assert "version" in data
+
     def test_response_is_an_sse_stream(self, client_factory, sse_rpc):
         client, _ = client_factory()
         r = client.post("/mcp", json={"jsonrpc": "2.0", "id": 1, "method": "initialize"})
