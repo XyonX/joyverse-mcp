@@ -1,0 +1,9 @@
+# Never commit credentials
+.env
+.env.*
+!.env.example
+
+# LLM transcripts may contain the persona and generated content
+transcript*.json
+*.log
+__pycache__/

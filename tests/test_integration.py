@@ -17,6 +17,7 @@ def build_server():
     """Recreate run.py's server against the test secret."""
     jv_auth.JWT_SECRET = TEST_SECRET
     from joyverse.profile import get_profile, update_profile
+    from joyverse.bio import get_bio, update_bio
     from joyverse.memory import get_memory, add_memory_trait, update_focus
     from joyverse.data import get_data, update_data
     from joyverse.prompts import USER_DATA
@@ -27,6 +28,8 @@ def build_server():
     )
     srv.tool(description="Get the user's personal profile")(get_profile)
     srv.tool(description="Update a field in the user profile")(update_profile)
+    srv.tool(description="Get the user's detailed life narrative")(get_bio)
+    srv.tool(description="Write or replace a section of the user's bio")(update_bio)
     srv.tool(description="Get the user's LLM memory model")(get_memory)
     srv.tool(description="Add a personality trait to memory")(add_memory_trait)
     srv.tool(description="Update the current main focus")(update_focus)
@@ -70,11 +73,12 @@ class TestHandshake:
         res = sse_rpc(app, "initialize", token=tok)
         assert res["result"]["serverInfo"]["name"] == "joyverse-mcp"
 
-    def test_all_seven_tools_registered(self, app, sse_rpc, tok):
+    def test_all_nine_tools_registered(self, app, sse_rpc, tok):
         tools = sse_rpc(app, "tools/list", token=tok)["result"]["tools"]
         assert {t["name"] for t in tools} == {
-            "get_profile", "update_profile", "get_memory",
-            "add_memory_trait", "update_focus", "get_data", "update_data"}
+            "get_profile", "update_profile", "get_bio", "update_bio",
+            "get_memory", "add_memory_trait", "update_focus",
+            "get_data", "update_data"}
 
     def test_instructions_reach_the_client(self, app, sse_rpc, tok):
         res = sse_rpc(app, "initialize", token=tok)
@@ -121,10 +125,59 @@ class TestProfileFlow:
         call(app, "update_profile", {"field": "age", "value": "5"}, token=tok)
         assert "age: 5" in fake_r2.store["users/joydip/profile.md"].decode()
 
-    def test_update_missing_profile_reports_error(self, app, tok):
+    def test_update_on_missing_profile_creates_it(self, app, tok, fake_r2):
+        # Regression: this used to fail with "Profile does not exist", which
+        # blocked onboarding any brand-new user.
         out = text_of(call(app, "update_profile",
-                           {"field": "age", "value": "5"}, token=tok))
-        assert "does not exist" in out
+                           {"field": "name", "value": "Aarav"}, token=tok))
+        assert "Error" not in out
+        assert "users/joydip/profile.md" in fake_r2.store
+
+    def test_section_field_creates_a_proper_block(self, app, tok, fake_r2):
+        call(app, "update_profile",
+             {"field": "Identity", "value": "name: Aarav\nage: 24"}, token=tok)
+        body = fake_r2.store["users/joydip/profile.md"].decode()
+        assert "## Identity" in body and "Identity: name:" not in body
+
+
+class TestBioFlow:
+    def test_missing_bio_returns_error_not_crash(self, app, tok):
+        assert "error" in json.loads(text_of(call(app, "get_bio", token=tok)))
+
+    def test_write_then_read_roundtrip(self, app, tok):
+        call(app, "update_bio",
+             {"section": "Background",
+              "content": "Aarav grew up in Pune."}, token=tok)
+        assert "Aarav grew up in Pune." in text_of(call(app, "get_bio", token=tok))
+
+    def test_section_writes_to_bio_key(self, app, tok, fake_r2):
+        call(app, "update_bio",
+             {"section": "Journey", "content": "2018: College"}, token=tok)
+        assert "users/joydip/bio.md" in fake_r2.store
+
+    def test_multiple_sections_coexist(self, app, tok):
+        call(app, "update_bio", {"section": "Background", "content": "b"}, token=tok)
+        call(app, "update_bio", {"section": "Goals", "content": "g"}, token=tok)
+        body = text_of(call(app, "get_bio", token=tok))
+        assert "## Background" in body and "## Goals" in body
+
+    def test_section_replacement_preserves_others(self, app, tok):
+        call(app, "update_bio", {"section": "Background", "content": "old"}, token=tok)
+        call(app, "update_bio", {"section": "Goals", "content": "keepme"}, token=tok)
+        call(app, "update_bio", {"section": "Background", "content": "new"}, token=tok)
+        body = text_of(call(app, "get_bio", token=tok))
+        assert "new" in body and "keepme" in body and "old" not in body
+
+    def test_bio_does_not_leak_across_users(self, app, tok, make_token):
+        call(app, "update_bio",
+             {"section": "Background", "content": "SECRET-STORY"}, token=tok)
+        other = make_token("someone-else", secret=TEST_SECRET)
+        assert "SECRET-STORY" not in text_of(call(app, "get_bio", token=other))
+
+    def test_empty_section_is_rejected(self, app, tok):
+        out = text_of(call(app, "update_bio",
+                           {"section": "##", "content": "x"}, token=tok))
+        assert "Error" in out
 
 
 class TestMemoryFlow:
@@ -217,11 +270,12 @@ class TestProtocolEdgeCases:
 class TestRunPySmoke:
     """Guards the actual run.py wiring, which the fixtures bypass."""
 
-    def test_run_module_registers_all_seven_tools(self):
+    def test_run_module_registers_all_nine_tools(self):
         import run
         assert {s.name for s in run.server._tool_schemas} == {
-            "get_profile", "update_profile", "get_memory",
-            "add_memory_trait", "update_focus", "get_data", "update_data"}
+            "get_profile", "update_profile", "get_bio", "update_bio",
+            "get_memory", "add_memory_trait", "update_focus",
+            "get_data", "update_data"}
 
     def test_run_module_carries_instructions(self):
         import run

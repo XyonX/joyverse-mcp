@@ -9,6 +9,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
+sys.path.insert(0, str(REPO_ROOT / "tests"))
 
 # auth.py reads JWT_SECRET at import time and only sees the real .env when
 # joyverse.config (which calls load_dotenv) was imported first. Do that here so
@@ -73,7 +74,7 @@ def fake_r2(monkeypatch):
     config's attribute alone would not update their local names.
     """
     fake = FakeR2()
-    modules = ["config", "profile", "memory", "data"]
+    modules = ["config", "profile", "bio", "memory", "data"]
     for name in modules:
         mod = __import__(f"joyverse.{name}", fromlist=["r2_client"])
         monkeypatch.setattr(mod, "r2_client", fake, raising=False)
