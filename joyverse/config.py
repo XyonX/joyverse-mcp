@@ -11,14 +11,33 @@ ACCESS_KEY = os.getenv("CLOUDFLARE_R2_ACCESS_KEY_ID")
 SECRET_KEY = os.getenv("CLOUDFLARE_R2_SECRET_ACCESS_KEY")
 BUCKET_NAME = os.getenv("CLOUDFLARE_R2_BUCKET_NAME")
 
-r2_client = boto3.client(
-    "s3",
-    endpoint_url=f"https://{ACCOUNT_ID}.r2.cloudflarestorage.com",
-    aws_access_key_id=ACCESS_KEY,
-    aws_secret_access_key=SECRET_KEY,
-    config=Config(signature_version="s3v4"),
-    region_name="auto"
-)
+_r2_client = None
+
+def get_r2_client():
+    """Lazy-initialized R2 client. Allows server to start without R2 creds."""
+    global _r2_client
+    if _r2_client is None:
+        if not all([ACCOUNT_ID, ACCESS_KEY, SECRET_KEY, BUCKET_NAME]):
+            raise RuntimeError("R2 credentials not configured. Set CLOUDFLARE_* env vars.")
+        _r2_client = boto3.client(
+            "s3",
+            endpoint_url=f"https://{ACCOUNT_ID}.r2.cloudflarestorage.com",
+            aws_access_key_id=ACCESS_KEY,
+            aws_secret_access_key=SECRET_KEY,
+            config=Config(signature_version="s3v4"),
+            region_name="auto"
+        )
+    return _r2_client
+
+# For backward compat with tests that monkeypatch r2_client
+# Use a callable that can be replaced
+class _R2ClientProxy:
+    def get_object(self, **kwargs):
+        return get_r2_client().get_object(**kwargs)
+    def put_object(self, **kwargs):
+        return get_r2_client().put_object(**kwargs)
+
+r2_client = _R2ClientProxy()
 
 # ==========================================
 # DYNAMIC KEY BUILDERS (Multi-user)
