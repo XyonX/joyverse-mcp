@@ -18,7 +18,10 @@ def get_profile(user: dict) -> str:
         return json.dumps({"error": f"R2 error: {str(e)}"})
 
 def update_profile(field: str, value: str, user: dict) -> str:
-    """Updates a specific field in the profile on R2."""
+    """Updates a specific field in the profile on R2.
+    
+    Parses profile by sections and updates exact key:value pairs.
+    """
     username = user["username"]
     try:
         key = get_profile_key(username)
@@ -33,15 +36,20 @@ def update_profile(field: str, value: str, user: dict) -> str:
             return "Error: Profile does not exist. Run setup_profile first."
         return f"Error: R2 error: {str(e)}"
     
+    # Parse by sections and update exact key matches
     lines = content.split("\n")
     updated = False
     for i, line in enumerate(lines):
-        if line.startswith(f"{field}:"):
-            lines[i] = f"{field}: {value}"
-            updated = True
-            break
+        stripped = line.strip()
+        if stripped.startswith(f"{field}:") and not stripped.startswith("#"):
+            # Ensure it's a key:value line (not a comment or header)
+            if ":" in stripped and stripped.index(":") == len(field):
+                lines[i] = f"{field}: {value}"
+                updated = True
+                break
     
     if not updated:
+        # Append to end of file (could be smarter - add to Identity section)
         lines.append(f"{field}: {value}")
     
     new_content = "\n".join(lines)

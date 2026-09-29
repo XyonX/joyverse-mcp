@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Request,Depends
+from fastapi import FastAPI, Request, Depends
 from fastapi.responses import StreamingResponse
 from typing import Callable, Dict, Any
 import uvicorn
@@ -17,7 +17,7 @@ class MCPServer:
         self.name = name
         self.version = version
         self.instructions = instructions or ""
-         
+        
         # Internal registries
         self._tool_functions: Dict[str, Callable] = {}
         self._tool_schemas: list = []
@@ -34,6 +34,11 @@ class MCPServer:
     def _create_app(self) -> FastAPI:
         """Builds the FastAPI application with MCP endpoint."""
         app = FastAPI(title=f"MCP Server: {self.name}")
+        
+        @app.get("/health")
+        async def health_check():
+            """Health check endpoint for load balancers / Docker."""
+            return {"status": "ok", "server": self.name, "version": self.version}
         
         @app.post("/mcp")
         async def handle_mcp(request: Request, user: dict = Depends(self._auth_dependency)):
@@ -73,7 +78,7 @@ class MCPServer:
         
         return app
 
-    def run(self, host: str = "127.0.0.1", port: int = 8000, reload: bool = False):
+    def run(self, host: str = "0.0.0.0", port: int = 8000, reload: bool = False):
         """Starts the MCP server using Uvicorn."""
         print(f"🚀 Starting MCP Server: {self.name} v{self.version}")
         print(f"   Tools registered: {len(self._tool_schemas)}")

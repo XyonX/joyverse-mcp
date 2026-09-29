@@ -78,7 +78,7 @@ class TestRunSignature:
     def test_accepts_host_and_port(self):
         import inspect
         sig = inspect.signature(MCPServer.run)
-        assert sig.parameters["host"].default == "127.0.0.1"
+        assert sig.parameters["host"].default == "0.0.0.0"
         assert sig.parameters["port"].default == 8000
         assert sig.parameters["reload"].default is False
 
