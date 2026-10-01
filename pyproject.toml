@@ -11,6 +11,10 @@ dependencies = [
     "boto3>=1.28.0",
     "python-dotenv>=1.0.0",
     "PyJWT>=2.8.0",
+    # PyJWT cannot verify RS256/ES256 tokens without a crypto backend. Any
+    # provider that signs with an asymmetric key (Auth0, Google, Clerk, ...)
+    # needs this to validate access tokens.
+    "cryptography>=42.0",
 ]
 
 [project.optional-dependencies]

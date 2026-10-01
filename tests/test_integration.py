@@ -284,3 +284,273 @@ class TestRunPySmoke:
     def test_run_module_uses_jwt_auth(self):
         import run
         assert run.server._auth_dependency is jv_auth.jwt_auth
+
+
+# ==========================================================
+# OAUTH END-TO-END
+#
+# The flows above cover the legacy bearer path. These cover the OAuth path a
+# real MCP client (Claude, Cursor, ChatGPT) takes: discover the metadata ->
+# get challenged -> present a token -> call a tool.
+# ==========================================================
+
+OAUTH_ISSUER = "https://tenant.example.auth0.com/"
+OAUTH_AUDIENCE = "https://joyverse.example.com"
+OAUTH_RESOURCE = "https://joyverse.example.com/mcp"
+
+
+@pytest.fixture(scope="module")
+def oauth_rsa():
+    from cryptography.hazmat.primitives.asymmetric import rsa
+    return rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+
+@pytest.fixture
+def oauth_client(oauth_rsa):
+    """A server using oauth_bearer_auth, with discovery mounted."""
+    from fastapi.testclient import TestClient
+    from mcppro.auth import oauth_bearer_auth
+    from mcppro.discovery import discovery_routes
+
+    pub = oauth_rsa.public_key()
+
+    class Stub:
+        def get_signing_key_from_jwt(self, token):
+            return type("K", (), {"key": pub})()
+
+    srv = MCPServer(
+        name="oauth-server", version="1.0.0",
+        auth=oauth_bearer_auth(issuer=OAUTH_ISSUER, audience=OAUTH_AUDIENCE,
+                               jwk_client=Stub()),
+        extra_routes=[discovery_routes(
+            OAUTH_RESOURCE,
+            authorization_servers=["https://tenant.example.auth0.com"],
+            scopes_supported=["joyverse:read", "joyverse:write"],
+        )],
+        resource_url=OAUTH_RESOURCE,
+    )
+    return TestClient(srv._app), srv
+
+
+def oauth_token(key, **overrides):
+    now = int(time.time())
+    claims = {"iss": OAUTH_ISSUER, "aud": OAUTH_AUDIENCE,
+              "sub": "auth0|abc123", "exp": now + 3600, "iat": now,
+              "scope": "joyverse:read joyverse:write"}
+    claims.update(overrides)
+    return pyjwt.encode(claims, key, algorithm="RS256", headers={"kid": "k1"})
+
+
+def rpc(client, method, params=None, token=None, req_id=1):
+    headers = {"Authorization": f"Bearer {token}"} if token else {}
+    body = {"jsonrpc": "2.0", "id": req_id, "method": method}
+    if params is not None:
+        body["params"] = params
+    resp = client.post("/mcp", json=body, headers=headers)
+    if resp.status_code != 200:
+        return resp
+    for line in resp.text.splitlines():
+        if line.startswith("data: "):
+            return json.loads(line[6:])
+    return None
+
+
+@pytest.mark.anyio
+class TestOAuthDiscoveryFlow:
+    """The exact sequence a compliant MCP client performs."""
+
+    async def test_metadata_is_discoverable_before_any_token(self, oauth_client):
+        client, _ = oauth_client
+        r = client.get("/.well-known/oauth-protected-resource/mcp")
+        assert r.status_code == 200
+        assert r.json()["authorization_servers"] == \
+            ["https://tenant.example.auth0.com"]
+
+    async def test_challenge_on_401_points_at_the_metadata(self, oauth_client):
+        # this is what lets a client bootstrap without being configured
+        client, _ = oauth_client
+        r = rpc(client, "tools/list")
+        assert r.status_code == 401
+        header = r.headers["www-authenticate"]
+        assert header.startswith("Bearer ")
+        assert "resource_metadata=" in header
+
+    async def test_the_challenged_url_is_actually_fetchable(self, oauth_client):
+        # the header must advertise a real, reachable document
+        client, _ = oauth_client
+        challenge = rpc(client, "tools/list").headers["www-authenticate"]
+        target = challenge.split('resource_metadata="')[1].split('"')[0]
+        path = target.replace("https://joyverse.example.com", "")
+        assert client.get(path).status_code == 200
+
+    async def test_advertised_scopes_match_the_enforced_ones(self, oauth_client):
+        client, _ = oauth_client
+        doc = client.get("/.well-known/oauth-protected-resource/mcp").json()
+        assert doc["scopes_supported"] == ["joyverse:read", "joyverse:write"]
+
+
+@pytest.mark.anyio
+class TestOAuthToolCalls:
+    async def test_tools_list_requires_a_token(self, oauth_client):
+        client, _ = oauth_client
+        assert rpc(client, "tools/list").status_code == 401
+
+    async def test_valid_token_lists_tools(self, oauth_client, oauth_rsa):
+        client, srv = oauth_client
+        srv.tool(description="d")(lambda: "hi")
+        assert "tools" in rpc(client, "tools/list",
+                              token=oauth_token(oauth_rsa))["result"]
+
+    async def test_wrong_audience_is_refused_end_to_end(self, oauth_client,
+                                                        oauth_rsa):
+        client, _ = oauth_client
+        tok = oauth_token(oauth_rsa, aud="https://some-other-app.example")
+        assert rpc(client, "tools/list", token=tok).status_code == 401
+
+    async def test_expired_token_is_refused_end_to_end(self, oauth_client,
+                                                       oauth_rsa):
+        client, _ = oauth_client
+        assert rpc(client, "tools/list",
+                   token=oauth_token(oauth_rsa, exp=int(time.time()) - 300)
+                   ).status_code == 401
+
+    async def test_subject_reaches_the_tool_as_user_context(self, oauth_client,
+                                                            oauth_rsa):
+        # the raw sub arrives in `user`; mapping it to storage is the app's job
+        client, srv = oauth_client
+
+        def whoami(user: dict):
+            return user["subject"]
+
+        srv.tool(description="d")(whoami)
+        res = rpc(client, "tools/call", {"name": "whoami", "arguments": {}},
+                  token=oauth_token(oauth_rsa, sub="auth0|abc123"))
+        assert res["result"]["content"][0]["text"] == "auth0|abc123"
+
+    async def test_scopes_arrive_in_the_tool_context(self, oauth_client, oauth_rsa):
+        client, srv = oauth_client
+
+        def scopes_of(user: dict):
+            return ",".join(user["scopes"])
+
+        srv.tool(description="d")(scopes_of)
+        res = rpc(client, "tools/call", {"name": "scopes_of", "arguments": {}},
+                  token=oauth_token(oauth_rsa))
+        assert res["result"]["content"][0]["text"] == \
+            "joyverse:read,joyverse:write"
+
+    async def test_client_cannot_supply_its_own_identity(self, oauth_client,
+                                                         oauth_rsa):
+        # the LLM must not be able to pass `user` and read someone else's data
+        client, srv = oauth_client
+
+        def whoami(user: dict):
+            return user["subject"]
+
+        srv.tool(description="d")(whoami)
+        res = rpc(client, "tools/call",
+                  {"name": "whoami", "arguments": {"user": {"subject": "attacker"}}},
+                  token=oauth_token(oauth_rsa, sub="auth0|realuser"))
+        assert res["result"]["content"][0]["text"] == "auth0|realuser"
+
+
+@pytest.mark.anyio
+class TestOAuthPerToolScopes:
+    async def test_under_scoped_call_is_refused(self, oauth_client, oauth_rsa):
+        client, srv = oauth_client
+
+        def writer():
+            return "wrote something"
+
+        srv.tool(description="d", scopes=["joyverse:write"])(writer)
+        res = rpc(client, "tools/call", {"name": "writer", "arguments": {}},
+                  token=oauth_token(oauth_rsa, scope="joyverse:read"))
+        assert res["result"]["isError"] is True
+        assert "Insufficient scope" in res["result"]["content"][0]["text"]
+
+    async def test_correctly_scoped_call_succeeds(self, oauth_client, oauth_rsa):
+        client, srv = oauth_client
+
+        def writer():
+            return "wrote something"
+
+        srv.tool(description="d", scopes=["joyverse:write"])(writer)
+        res = rpc(client, "tools/call", {"name": "writer", "arguments": {}},
+                  token=oauth_token(oauth_rsa))
+        assert res["result"]["isError"] is False
+
+    async def test_scopeless_tool_stays_open_to_any_caller(self, oauth_client,
+                                                           oauth_rsa):
+        # backwards compatible: tools without scopes behave as before
+        client, srv = oauth_client
+
+        def anything():
+            return "ok"
+
+        srv.tool(description="d")(anything)
+        res = rpc(client, "tools/call", {"name": "anything", "arguments": {}},
+                  token=oauth_token(oauth_rsa, scope=""))
+        assert res["result"]["isError"] is False
+
+    async def test_scopes_are_not_leaked_into_the_advertised_schema(self,
+                                                                   oauth_client,
+                                                                   oauth_rsa):
+        client, srv = oauth_client
+
+        def writer():
+            return "ok"
+
+        srv.tool(description="d", scopes=["joyverse:write"])(writer)
+        res = rpc(client, "tools/list", token=oauth_token(oauth_rsa))
+        assert "joyverse:write" not in json.dumps(res["result"]["tools"])
+
+
+@pytest.mark.anyio
+class TestOAuthAndLegacyCoexist:
+    """The transition case: both credential types live at once."""
+
+    @pytest.fixture
+    def combined(self, oauth_rsa):
+        from fastapi import HTTPException
+        from fastapi.testclient import TestClient
+        from mcppro.auth import oauth_bearer_auth, any_auth
+        from mcppro.discovery import discovery_routes
+
+        pub = oauth_rsa.public_key()
+
+        class Stub:
+            def get_signing_key_from_jwt(self, token):
+                return type("K", (), {"key": pub})()
+
+        def legacy(request):
+            if request.headers.get("X-API-Key") != "legacy-secret":
+                raise HTTPException(status_code=401, detail="Invalid API Key")
+            return {"api_key": "legacy-secret", "role": "user"}
+
+        srv = MCPServer(
+            name="combined", version="1.0.0",
+            auth=any_auth(
+                oauth_bearer_auth(issuer=OAUTH_ISSUER, audience=OAUTH_AUDIENCE,
+                                  jwk_client=Stub()),
+                legacy,
+            ),
+            extra_routes=[discovery_routes(
+                OAUTH_RESOURCE,
+                authorization_servers=["https://tenant.example.auth0.com"])],
+            resource_url=OAUTH_RESOURCE,
+        )
+        return TestClient(srv._app)
+
+    async def test_oauth_token_works(self, combined, oauth_rsa):
+        assert "tools" in rpc(combined, "tools/list",
+                              token=oauth_token(oauth_rsa))["result"]
+
+    async def test_legacy_api_key_still_works(self, combined):
+        r = combined.post("/mcp", json={"jsonrpc": "2.0", "id": 1,
+                                        "method": "tools/list"},
+                          headers={"X-API-Key": "legacy-secret"})
+        assert r.status_code == 200
+
+    async def test_discovery_still_works(self, combined):
+        assert combined.get(
+            "/.well-known/oauth-protected-resource/mcp").status_code == 200
