@@ -36,6 +36,16 @@ TEST_EMAIL = os.getenv("AUTH0_TEST_EMAIL", "").strip()
 TEST_PASSWORD = os.getenv("AUTH0_TEST_PASSWORD", "").strip()
 BASE_URL = os.getenv("PUBLIC_BASE_URL", "").strip().rstrip("/")
 
+# Sent on every request. Some edge layers (Cloudflare among them) reject
+# requests that carry no User-Agent at all with a 403, which would look like
+# a server or auth failure when it is neither. urllib sends no UA by default.
+USER_AGENT = "joyverse-mcp-live-check/1.0"
+HTTP_HEADERS = {"User-Agent": USER_AGENT}
+
+# RFC 9728 discovery prefix. Kept in one place so the discovery and
+# issuer-consistency checks cannot drift onto different paths.
+WELL_KNOWN = "/.well-known/oauth-protected-resource"
+
 GREEN, RED, YELLOW, DIM, RESET = (
     "\033[32m", "\033[31m", "\033[33m", "\033[2m", "\033[0m")
 PASSED, FAILED, WARNED = [], [], []
@@ -113,6 +123,7 @@ def rpc(token, method, params=None, req_id=1):
             "Content-Type": "application/json",
             "Accept": "text/event-stream",
             "Authorization": f"Bearer {token}",
+            **HTTP_HEADERS,
         },
     )
     try:
@@ -129,7 +140,8 @@ def rpc(token, method, params=None, req_id=1):
 
 def http_get(path, headers=None):
     url = path if path.startswith("http") else f"{BASE_URL}{path}"
-    req = urllib.request.Request(url, headers=headers or {})
+    merged = {**HTTP_HEADERS, **(headers or {})}
+    req = urllib.request.Request(url, headers=merged)
     try:
         with urllib.request.urlopen(req, timeout=20) as resp:
             return resp.status, resp.read().decode(), resp.headers
@@ -212,7 +224,7 @@ def check_claims(token):
 
 
 def check_discovery():
-    root = "/.well-known/oauth-protected-resource"
+    root = WELL_KNOWN
     inserted = f"{root}/mcp"
 
     status, body, headers = http_get(inserted)
@@ -250,6 +262,51 @@ def check_discovery():
         ok("root metadata also served (client variance)")
     else:
         warn("root metadata not served", f"-> {status_root}")
+
+
+def check_issuer_consistency():
+    """Walk the discovery chain the way an MCP client does.
+
+    A client fetches {AS}/.well-known/oauth-authorization-server and compares
+    its `issuer` field against the URL it fetched. Any difference -- even a
+    trailing slash -- aborts the connection with an "issuer mismatch" error.
+    This is the check that would have caught the bug ChatGPT reported, and it
+    is the one our own tests were missing.
+    """
+    status, body, _ = http_get(f"{WELL_KNOWN}/mcp")
+    if status != 200:
+        return  # already reported by check_discovery
+
+    advertised = (json.loads(body).get("authorization_servers") or [None])[0]
+    if not advertised:
+        return  # already reported
+
+    # rstrip before appending: the issuer ends in "/" by design, and joining
+    # blindly would produce "...auth0.com//.well-known/..." and 404. The
+    # comparison below still uses the advertised value verbatim.
+    status, body, _ = http_get(
+        f"{advertised.rstrip('/')}/.well-known/oauth-authorization-server")
+    if status != 200:
+        fail("authorization server metadata unreachable",
+             f"{advertised} -> {status}")
+        return
+
+    as_metadata = json.loads(body)
+    real_issuer = as_metadata.get("issuer")
+
+    if real_issuer == advertised:
+        ok("advertised AS matches its own issuer field", real_issuer)
+    else:
+        fail("issuer mismatch -- MCP clients will refuse to connect",
+             f"advertised {advertised!r} != issuer {real_issuer!r}")
+
+    # The token's iss claim must be the same string too, or validation and
+    # discovery disagree with each other.
+    if real_issuer == f"https://{DOMAIN}/":
+        ok("issuer is consistent with this tenant")
+    else:
+        warn("issuer differs from the configured tenant",
+             f"{real_issuer!r} vs https://{DOMAIN}/")
 
 
 def check_challenge():
@@ -370,6 +427,7 @@ def main():
 
     section("3. DISCOVERY (RFC 9728)")
     check_discovery()
+    check_issuer_consistency()
 
     section("4. AUTH CHALLENGE")
     check_challenge()

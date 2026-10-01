@@ -94,6 +94,62 @@ class TestTraversalRegression:
             f"users/{UID}/data/games/played.json"
 
 
+class TestIssuerAdvertisement:
+    """The issuer we advertise must byte-match the AS metadata's `issuer`.
+
+    This is the check a compliant MCP client performs, and it is a strict
+    string comparison. Auth0's issuer ends in "/", so advertising it without
+    the slash made every MCP client refuse to connect with:
+
+        OAuth error: Authorization server metadata issuer mismatch:
+        https://tenant.auth0.com/ != https://tenant.auth0.com
+
+    Only a real client catches this: our own tests compared claims rather
+    than walking the discovery chain the way a client does.
+    """
+
+    ISSUER = "https://tenant.auth0.com/"
+
+    def test_advertised_issuer_keeps_its_trailing_slash(self):
+        from joyverse import config
+
+        assert config.authorization_servers() is not None
+
+    def test_advertised_value_is_the_exact_issuer_string(self, monkeypatch):
+        from joyverse import config
+
+        monkeypatch.setattr(config, "OAUTH_ENABLED", True)
+        monkeypatch.setattr(config, "AUTH0_DOMAIN", "tenant.auth0.com")
+        advertised = config.authorization_servers()[0]
+
+        # This is verbatim what an MCP client compares.
+        assert advertised == self.ISSUER
+        assert advertised.endswith("/")
+
+    def test_discovery_and_token_validation_agree(self, monkeypatch):
+        # The same string must serve both roles, or one of them is wrong.
+        from joyverse import config
+
+        monkeypatch.setattr(config, "OAUTH_ENABLED", True)
+        monkeypatch.setattr(config, "AUTH0_DOMAIN", "tenant.auth0.com")
+        assert config.authorization_servers()[0] == config.issuer_url()
+
+    def test_domain_with_trailing_slash_is_normalised(self, monkeypatch):
+        # A user pasting "https://tenant.auth0.com/" into AUTH0_DOMAIN must
+        # still produce exactly one slash, not two.
+        from joyverse import config
+
+        monkeypatch.setattr(config, "OAUTH_ENABLED", True)
+        monkeypatch.setattr(config, "AUTH0_DOMAIN", "https://tenant.auth0.com/")
+        assert config.issuer_url() == self.ISSUER
+
+    def test_bare_domain_gets_https_and_one_slash(self, monkeypatch):
+        from joyverse import config
+
+        monkeypatch.setattr(config, "AUTH0_DOMAIN", "tenant.auth0.com")
+        assert config.issuer_url() == self.ISSUER
+
+
 class TestSafeUserId:
     """The stricter guard on the value that actually reaches R2."""
 
