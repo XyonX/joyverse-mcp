@@ -4,11 +4,11 @@ from joyverse.config import r2_client, BUCKET_NAME, get_bio_key
 
 def get_bio(user: dict) -> str:
     """Reads the user's biography from R2."""
-    username = user["username"]
+    user_id = user["user_id"]
     try:
-        key = get_bio_key(username)
+        key = get_bio_key(user_id)
     except ValueError as e:
-        return json.dumps({"error": f"Invalid username: {e}"})
+        return json.dumps({"error": f"Invalid user_id: {e}"})
 
     try:
         response = r2_client.get_object(Bucket=BUCKET_NAME, Key=key)
@@ -16,7 +16,7 @@ def get_bio(user: dict) -> str:
     except Exception as e:
         if "NoSuchKey" in str(e):
             return json.dumps(
-                {"error": f"No bio found for {username}. Build it with update_bio first."})
+                {"error": f"No bio found for {user_id}. Build it with update_bio first."})
         return json.dumps({"error": f"R2 error: {str(e)}"})
 
 
@@ -27,11 +27,11 @@ def update_bio(section: str, content: str, user: dict) -> str:
     section at a time rather than as flat key:value pairs. If the section
     already exists its body is replaced in place; otherwise it is appended.
     """
-    username = user["username"]
+    user_id = user["user_id"]
     try:
-        key = get_bio_key(username)
+        key = get_bio_key(user_id)
     except ValueError as e:
-        return f"Error: Invalid username: {e}"
+        return f"Error: Invalid user_id: {e}"
 
     section = section.strip()
     if not section:

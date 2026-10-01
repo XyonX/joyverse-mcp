@@ -2,9 +2,9 @@ import json
 from joyverse.config import r2_client, BUCKET_NAME, get_data_key
 
 def get_data(topic: str, user: dict) -> str:
-    username = user["username"]
+    user_id = user["user_id"]
     try:
-        key = get_data_key(username, topic)
+        key = get_data_key(user_id, topic)
     except ValueError as e:
         return json.dumps({"error": f"Invalid topic: {e}"})
     try:
@@ -16,9 +16,9 @@ def get_data(topic: str, user: dict) -> str:
         return json.dumps({"error": f"R2 error: {str(e)}"})
 
 def update_data(topic: str, data: str, user: dict) -> str:
-    username = user["username"]
+    user_id = user["user_id"]
     try:
-        key = get_data_key(username, topic)
+        key = get_data_key(user_id, topic)
     except ValueError as e:
         return f"Error: Invalid topic: {e}"
     try:
