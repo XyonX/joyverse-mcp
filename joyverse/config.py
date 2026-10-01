@@ -131,8 +131,21 @@ def issuer_url() -> str:
 
 
 def authorization_servers() -> list:
-    """Issuers listed in the RFC 9728 discovery document."""
-    return [issuer_url().rstrip("/")] if OAUTH_ENABLED and AUTH0_DOMAIN else []
+    """Issuers listed in the RFC 9728 discovery document.
+
+    The value MUST be byte-identical to the `issuer` field in the
+    authorization server's own metadata, trailing slash included. A compliant
+    MCP client fetches {AS}/.well-known/oauth-authorization-server and compares
+    the two as strings; Auth0's issuer ends in "/", so stripping it here makes
+    the client refuse to connect with:
+
+        Authorization server metadata issuer mismatch:
+        https://tenant.auth0.com/ != https://tenant.auth0.com
+
+    That is why this returns issuer_url() unmodified while token validation
+    uses the same string for PyJWT's exact `iss` match.
+    """
+    return [issuer_url()] if OAUTH_ENABLED and AUTH0_DOMAIN else []
 
 
 def resource_url() -> str:

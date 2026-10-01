@@ -4,6 +4,7 @@ from joyverse.config import (
     OAUTH_ENABLED, AUTH0_DOMAIN, AUTH0_AUDIENCE, PUBLIC_BASE_URL,
     READ_SCOPE, WRITE_SCOPE, SUPPORTED_SCOPES, resource_url,
 )
+from joyverse import config as jv_config
 from joyverse.profile import get_profile, update_profile
 from joyverse.bio import get_bio, update_bio
 from joyverse.memory import get_memory, add_memory_trait, update_focus
@@ -39,11 +40,14 @@ def build_discovery_routes():
     if not (OAUTH_ENABLED and PUBLIC_BASE_URL and AUTH0_DOMAIN):
         return []
 
-    from joyverse.config import issuer_url
-
+    # The issuer comes from config.authorization_servers() rather than being
+    # rebuilt here. It used to be issuer_url().rstrip("/") inline, which
+    # dropped the trailing slash Auth0's issuer carries -- and every MCP
+    # client then refused to connect with an "issuer mismatch" error. One
+    # definition, used by both discovery and token validation.
     return [discovery_routes(
         resource_url=resource_url(),
-        authorization_servers=[issuer_url().rstrip("/")],
+        authorization_servers=jv_config.authorization_servers(),
         scopes_supported=SUPPORTED_SCOPES,
     )]
 
