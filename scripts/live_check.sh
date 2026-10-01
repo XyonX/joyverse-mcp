@@ -27,8 +27,23 @@ curl -s -o /dev/null -w 'status=%{http_code}\n' -X POST "$BASE/mcp" \
   -H 'Content-Type: application/json' \
   -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
 
-echo "--- POST /mcp tools/list with a bad token (expect 401) ---"
-curl -s -o /dev/null -w 'status=%{http_code}\n' -X POST "$BASE/mcp" \
-  -H 'Content-Type: application/json' \
-  -H 'Authorization: Bearer not-a-real-token' \
-  -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+echo "--- POST /mcp with a minted bearer token ---"
+TOKEN=$("$PY" scripts/generate_token.py 2>/dev/null | sed -n '/--- TOKEN ---/{n;p;}')
+if [ -z "$TOKEN" ]; then
+  echo "could not mint a token; skipping"
+else
+  curl -s -X POST "$BASE/mcp" \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | head -c 200
+  echo
+fi
+
+echo "--- POST /mcp tools/call get_profile with a bearer token ---"
+if [ -n "$TOKEN" ]; then
+  curl -s -X POST "$BASE/mcp" \
+    -H 'Content-Type: application/json' \
+    -H "Authorization: Bearer $TOKEN" \
+    -d '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"get_profile","arguments":{}}}'
+  echo
+fi

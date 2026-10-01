@@ -22,6 +22,14 @@ import joyverse.auth as jv_auth  # noqa: E402
 TEST_SECRET = "test-secret-not-a-real-one"
 TEST_BUCKET = "test-bucket"
 
+# user_ids are server-minted as "u_" + 12 lowercase hex chars. Tests use fixed
+# values rather than identity.new_user_id() so the expected R2 keys stay
+# readable and assertable.
+TEST_USER_ID = "u_a1b2c3d4e5f6"
+TEST_USER_ID_2 = "u_0a1b2c3d4e5f"
+TEST_USER = {"user_id": TEST_USER_ID}
+TEST_USER_2 = {"user_id": TEST_USER_ID_2}
+
 
 @pytest.fixture
 def anyio_backend():
@@ -74,7 +82,9 @@ def fake_r2(monkeypatch):
     config's attribute alone would not update their local names.
     """
     fake = FakeR2()
-    modules = ["config", "profile", "bio", "memory", "data"]
+    # identity was added later; it imports r2_client too and must be patched
+    # or the registry would be read from and written to the real bucket.
+    modules = ["config", "profile", "bio", "memory", "data", "identity"]
     for name in modules:
         mod = __import__(f"joyverse.{name}", fromlist=["r2_client"])
         monkeypatch.setattr(mod, "r2_client", fake, raising=False)
@@ -84,12 +94,12 @@ def fake_r2(monkeypatch):
 
 @pytest.fixture
 def make_token():
-    """Build a signed JWT for arbitrary claims."""
+    """Build a signed bearer JWT for arbitrary claims."""
     import jwt as pyjwt
 
-    def _make(username="joydip", secret=None, exp_delta=3600, **extra):
+    def _make(handle="tester", secret=None, exp_delta=3600, **extra):
         import time
-        payload = {"username": username, "exp": int(time.time()) + exp_delta}
+        payload = {"handle": handle, "exp": int(time.time()) + exp_delta}
         payload.update(extra)
         return pyjwt.encode(payload, secret or TEST_SECRET, algorithm="HS256")
 
@@ -97,8 +107,9 @@ def make_token():
 
 
 @pytest.fixture
-def valid_token(make_token):
-    return make_token("joydip")
+def valid_token(make_token, fake_r2):
+    """A token whose handle resolves against the fake registry."""
+    return make_token("tester")
 
 
 @pytest.fixture

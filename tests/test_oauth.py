@@ -4,6 +4,7 @@ Real RS256 keys are generated per session with `cryptography` and real tokens
 are signed, so signature verification is genuinely exercised. No network: the
 JWKS client is always injected as a stub.
 """
+import json
 import time
 
 import jwt
@@ -239,6 +240,111 @@ class TestConstruction:
     def test_returns_a_callable(self, jwk_client):
         assert callable(oauth_bearer_auth(issuer=ISSUER, audience=AUDIENCE,
                                           jwk_client=jwk_client))
+
+
+class TestDefaultJwkClient:
+    """The real (non-stubbed) client, with only the network faked.
+
+    Regression: `uri` was once shadowed by a read-only property, but PyJWT
+    assigns to it in __init__ -- so constructing the client raised
+    AttributeError and every real OAuth request failed. Only surfaced when
+    OAUTH_ENABLED was actually turned on.
+    """
+
+    def test_constructs_without_error(self):
+        from mcppro.auth import default_jwk_client
+
+        client = default_jwk_client(ISSUER)
+        assert client is not None
+
+    def test_uri_is_writable(self):
+        # PyJWT assigns self.uri internally; it must not be read-only
+        from mcppro.auth import default_jwk_client
+
+        client = default_jwk_client(ISSUER)
+        client.uri = "https://example.test/keys.json"
+        assert client.uri == "https://example.test/keys.json"
+
+    def test_starts_at_the_discovery_url(self):
+        from mcppro.auth import default_jwk_client
+
+        client = default_jwk_client(ISSUER)
+        assert client.uri.endswith("/.well-known/openid-configuration")
+
+    def test_fetch_resolves_jwks_uri_from_discovery(self, monkeypatch):
+        from mcppro.auth import default_jwk_client
+
+        class FakeResp:
+            def __init__(self, payload):
+                self.payload = payload
+
+            def read(self):
+                return json.dumps(self.payload).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        # A real key, so PyJWKSet can actually build a signing key from it. A stub
+        # dict fails with "did not contain any usable keys", which would be an
+        # artefact of the fixture rather than a real result.
+        from cryptography.hazmat.primitives.asymmetric import rsa as _rsa_mod
+
+        private = _rsa_mod.generate_private_key(public_exponent=65537,
+                                                key_size=2048)
+        jwk = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(private.public_key()))
+        jwk.update({"kid": "k1", "alg": "RS256", "use": "sig"})
+
+        # The discovery document, then the JWKS itself.
+        responses = [
+            FakeResp({"jwks_uri": "https://as.example/.well-known/jwks.json"}),
+            FakeResp({"keys": [jwk]}),
+        ]
+
+        # PyJWT builds a urllib opener and calls opener.open(...) -- it does not
+        # call urlopen directly -- so build_opener is what has to be
+        # intercepted for the JWKS fetch.
+        class FakeOpener:
+            def open(self, request, timeout=None):
+                return responses.pop(0)
+
+        monkeypatch.setattr("urllib.request.build_opener",
+                            lambda *handlers: FakeOpener())
+
+        # Our own discovery step calls urlopen() directly, so patch that too.
+        monkeypatch.setattr("urllib.request.urlopen",
+                            lambda *a, **k: responses.pop(0))
+
+        client = default_jwk_client(ISSUER)
+        data = client.fetch_data()
+
+        # The parent must now be pointed at the real JWKS endpoint...
+        assert client.uri == "https://as.example/.well-known/jwks.json"
+        # ...and the keys must have come back.
+        assert data["keys"][0]["kid"] == "k1"
+        # Both responses consumed: discovery first, then JWKS.
+        assert not responses
+
+    def test_missing_jwks_uri_is_an_error(self, monkeypatch):
+        from mcppro.auth import default_jwk_client
+        import jwt as pyjwt_mod
+
+        class FakeResp:
+            def read(self):
+                return json.dumps({"issuer": "x"}).encode()
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *a):
+                return False
+
+        monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: FakeResp())
+        client = default_jwk_client(ISSUER)
+        with pytest.raises(pyjwt_mod.PyJWKClientError):
+            client.fetch_data()
 
 
 class TestAnyAuth:

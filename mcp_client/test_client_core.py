@@ -229,5 +229,18 @@ class TestPersonaAndIsolation:
         assert mc.TEST_USERNAME == "aarav-test"
 
     def test_client_never_touches_another_user(self, client, fake_r2):
+        # Storage is keyed by the resolved user_id, not by the handle, so the
+        # assertion asks the registry where this persona actually writes
+        # instead of assuming a path.
+        #
+        # The identity registry itself is server infrastructure and lives under
+        # the same users/ prefix, so it is excluded: what matters is that no
+        # key belongs to anybody other than this persona.
+        from joyverse import identity
+
         client.call_tool("update_bio", {"section": "S", "content": "mine"})
-        assert all(k.startswith("users/aarav-test/") for k in fake_r2.store)
+        prefix = f"users/{identity.resolve_handle(mc.TEST_USERNAME)}/"
+        data_keys = [k for k in fake_r2.store if not k.startswith("users/_registry/")]
+
+        assert data_keys, "the client wrote nothing to assert on"
+        assert all(k.startswith(prefix) for k in data_keys)

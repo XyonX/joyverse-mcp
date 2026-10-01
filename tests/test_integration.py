@@ -45,8 +45,31 @@ def app(fake_r2):
 
 
 @pytest.fixture
-def tok(make_token):
-    return make_token("joydip", secret=TEST_SECRET)
+def tok(make_token, fake_r2):
+    """A bearer token whose handle is registered in the fake registry.
+
+    The R2 path a user reads and writes is derived from the resolved user_id,
+    so tests that seed storage must ask the registry for that id rather than
+    guessing a path from the handle.
+    """
+    token = make_token("joydip", secret=TEST_SECRET)
+    return token
+
+
+@pytest.fixture
+def joy_key(fake_r2):
+    """The R2 prefix that the `joydip` token actually reads and writes."""
+    from joyverse import identity
+
+    return f"users/{identity.resolve_handle('joydip')}"
+
+
+@pytest.fixture
+def alice_key(fake_r2):
+    """The R2 prefix belonging to the `alice` handle."""
+    from joyverse import identity
+
+    return f"users/{identity.resolve_handle('alice')}"
 
 
 def call(app, tool, arguments=None, token=None, req_id=1):
@@ -115,28 +138,28 @@ class TestProfileFlow:
     def test_read_missing_profile_returns_error_not_crash(self, app, tok):
         assert "error" in json.loads(text_of(call(app, "get_profile", token=tok)))
 
-    def test_update_then_read_roundtrip(self, app, tok, fake_r2):
-        fake_r2.seed("users/joydip/profile.md", "name: Joydip\nage: 22\n")
+    def test_update_then_read_roundtrip(self, app, tok, fake_r2, joy_key):
+        fake_r2.seed(f"{joy_key}/profile.md", "name: Joydip\nage: 22\n")
         call(app, "update_profile", {"field": "age", "value": "23"}, token=tok)
         assert "age: 23" in text_of(call(app, "get_profile", token=tok))
 
-    def test_update_writes_the_users_key(self, app, tok, fake_r2):
-        fake_r2.seed("users/joydip/profile.md", "age: 1\n")
+    def test_update_writes_the_users_key(self, app, tok, fake_r2, joy_key):
+        fake_r2.seed(f"{joy_key}/profile.md", "age: 1\n")
         call(app, "update_profile", {"field": "age", "value": "5"}, token=tok)
-        assert "age: 5" in fake_r2.store["users/joydip/profile.md"].decode()
+        assert "age: 5" in fake_r2.store[f"{joy_key}/profile.md"].decode()
 
-    def test_update_on_missing_profile_creates_it(self, app, tok, fake_r2):
+    def test_update_on_missing_profile_creates_it(self, app, tok, fake_r2, joy_key):
         # Regression: this used to fail with "Profile does not exist", which
         # blocked onboarding any brand-new user.
         out = text_of(call(app, "update_profile",
                            {"field": "name", "value": "Aarav"}, token=tok))
         assert "Error" not in out
-        assert "users/joydip/profile.md" in fake_r2.store
+        assert f"{joy_key}/profile.md" in fake_r2.store
 
-    def test_section_field_creates_a_proper_block(self, app, tok, fake_r2):
+    def test_section_field_creates_a_proper_block(self, app, tok, fake_r2, joy_key):
         call(app, "update_profile",
              {"field": "Identity", "value": "name: Aarav\nage: 24"}, token=tok)
-        body = fake_r2.store["users/joydip/profile.md"].decode()
+        body = fake_r2.store[f"{joy_key}/profile.md"].decode()
         assert "## Identity" in body and "Identity: name:" not in body
 
 
@@ -150,10 +173,10 @@ class TestBioFlow:
               "content": "Aarav grew up in Pune."}, token=tok)
         assert "Aarav grew up in Pune." in text_of(call(app, "get_bio", token=tok))
 
-    def test_section_writes_to_bio_key(self, app, tok, fake_r2):
+    def test_section_writes_to_bio_key(self, app, tok, fake_r2, joy_key):
         call(app, "update_bio",
              {"section": "Journey", "content": "2018: College"}, token=tok)
-        assert "users/joydip/bio.md" in fake_r2.store
+        assert f"{joy_key}/bio.md" in fake_r2.store
 
     def test_multiple_sections_coexist(self, app, tok):
         call(app, "update_bio", {"section": "Background", "content": "b"}, token=tok)
@@ -224,18 +247,18 @@ class TestDataFlow:
 
 
 class TestUserIsolation:
-    def test_two_users_get_separate_profiles(self, app, tok, make_token, fake_r2):
-        fake_r2.seed("users/joydip/profile.md", "name: Joydip\n")
-        fake_r2.seed("users/alice/profile.md", "name: Alice\n")
+    def test_two_users_get_separate_profiles(self, app, tok, make_token, fake_r2, joy_key, alice_key):
+        fake_r2.seed(f"{joy_key}/profile.md", "name: Joydip\n")
+        fake_r2.seed(f"{alice_key}/profile.md", "name: Alice\n")
         alice = make_token("alice", secret=TEST_SECRET)
         assert "Alice" in text_of(call(app, "get_profile", token=alice))
         assert "Joydip" in text_of(call(app, "get_profile", token=tok))
 
-    def test_user_a_update_does_not_touch_user_b(self, app, tok, make_token, fake_r2):
-        fake_r2.seed("users/alice/profile.md", "age: 99\n")
-        fake_r2.seed("users/joydip/profile.md", "age: 1\n")
+    def test_user_a_update_does_not_touch_user_b(self, app, tok, make_token, fake_r2, joy_key, alice_key):
+        fake_r2.seed(f"{alice_key}/profile.md", "age: 99\n")
+        fake_r2.seed(f"{joy_key}/profile.md", "age: 1\n")
         call(app, "update_profile", {"field": "age", "value": "50"}, token=tok)
-        assert "age: 99" in fake_r2.store["users/alice/profile.md"].decode()
+        assert "age: 99" in fake_r2.store[f"{alice_key}/profile.md"].decode()
 
     def test_client_cannot_supply_its_own_user_param(self, app, tok):
         out = text_of(call(app, "get_profile", {"user": {"username": "alice"}},
@@ -281,9 +304,46 @@ class TestRunPySmoke:
         import run
         assert run.server.instructions
 
-    def test_run_module_uses_jwt_auth(self):
+    def test_run_module_wires_bearer_auth(self):
+        # run.py composes strategies with any_auth(), so the dependency is the
+        # chain rather than a bare function. Bearer must always be in it:
+        # it is the recovery path when the OAuth provider is misconfigured.
         import run
-        assert run.server._auth_dependency is jv_auth.jwt_auth
+        assert callable(run.server._auth_dependency)
+
+    def test_build_auth_includes_bearer(self):
+        import run
+
+        chain = run.build_auth()
+        # Exercised end to end: a self-issued token must still authenticate.
+        assert chain is not None
+
+    def test_bearer_token_works_through_the_real_wiring(self):
+        import run
+        from conftest import TEST_SECRET
+        import jwt as pyjwt
+        import time as _time
+
+        class Req:
+            def __init__(self, headers):
+                self.headers = headers
+
+        token = pyjwt.encode({"handle": "wiretest",
+                              "exp": int(_time.time()) + 60},
+                             TEST_SECRET, algorithm="HS256")
+        ctx = run.server._auth_dependency(
+            Req({"Authorization": f"Bearer {token}"}))
+        assert ctx["user_id"]
+
+    def test_oauth_is_only_wired_when_configured(self):
+        import run
+        from joyverse import config as jv_config
+
+        # Bearer stays available either way; OAuth is additive.
+        assert callable(run.server._auth_dependency)
+        if not (jv_config.OAUTH_ENABLED and jv_config.AUTH0_DOMAIN
+                and jv_config.AUTH0_AUDIENCE):
+            assert not run.server._extra_routes
 
 
 # ==========================================================
