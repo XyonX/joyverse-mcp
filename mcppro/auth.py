@@ -66,25 +66,39 @@ def default_jwk_client(issuer: str, timeout: float = 30.0):
     discovery_url = issuer.rstrip("/") + "/.well-known/openid-configuration"
 
     class _DiscoveryJWKClient(jwt.PyJWKClient):
-        """Resolves the real JWKS URI from discovery on first use."""
+        """Resolves the real JWKS URI from OIDC discovery on first use.
 
-        _resolved_uri = None
+        PyJWKClient stores its endpoint in a plain `uri` attribute and assigns
+        to it inside __init__, so this must NOT be shadowed by a read-only
+        property. Instead the discovery document is fetched lazily and the
+        parent is pointed at the resolved jwks_uri before the first fetch.
+        """
 
         def __init__(self):
+            # The parent stores `discovery_url` as `uri` for now; fetch_data
+            # swaps in the real JWKS endpoint before anything reads it.
             super().__init__(discovery_url, cache_jwk_set=True, lifespan=300,
                              timeout=timeout)
+            self._resolved = False
 
-        @property
-        def uri(self) -> str:
-            if self._resolved_uri is None:
+        def fetch_data(self):
+            """Fetch the JWKS, resolving it through discovery on first call."""
+            if not self._resolved:
                 import json
                 from urllib.request import urlopen
 
-                with urlopen(discovery_url, timeout=timeout) as resp:
-                    self._resolved_uri = json.loads(
-                        resp.read().decode("utf-8")
-                    )["jwks_uri"]
-            return self._resolved_uri
+                with urlopen(self.uri, timeout=self.timeout) as resp:
+                    metadata = json.loads(resp.read().decode("utf-8"))
+                jwks_uri = metadata.get("jwks_uri")
+                if not jwks_uri:
+                    raise jwt.PyJWKClientError(
+                        f"Discovery document at {self.uri} has no jwks_uri")
+                # Swap the endpoint for real. This is what makes the JWKS come
+                # from the issuer rather than a URL configured separately, so
+                # the two can never drift apart.
+                self.uri = jwks_uri
+                self._resolved = True
+            return super().fetch_data()
 
     return _DiscoveryJWKClient()
 
