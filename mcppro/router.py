@@ -1,6 +1,7 @@
 import inspect
 from mcppro import transport, types
 from mcppro.types import MCPToolResult, MCPContent, MCPCapabilities, MCPServerInfo
+from mcppro.scopes import require_scopes
 from typing import Any, Dict, AsyncGenerator
 
 async def route_request(
@@ -12,7 +13,8 @@ async def route_request(
     tool_schemas: list,
     tool_functions: dict,
     instructions: str = "",
-    user_context: dict = None
+    user_context: dict = None,
+    tool_scopes: Dict[str, list] = None
 ) -> AsyncGenerator[str, None]:
     """
     Routes a JSON-RPC method to the appropriate handler.
@@ -20,9 +22,15 @@ async def route_request(
 
     user_context is the dict returned by the auth strategy, injected into any
     tool function that declares a 'user' parameter.
+
+    tool_scopes maps a tool name to the scopes required to call it. A tool
+    absent from the mapping has no scope requirement, so servers that do not
+    use OAuth behave exactly as before.
     """
     if user_context is None:
         user_context = {}
+    if tool_scopes is None:
+        tool_scopes = {}
 
     # ==========================================
     # A. LIFECYCLE: Initialize
@@ -74,6 +82,15 @@ async def route_request(
                 )
             else:
                 try:
+                    # ==========================================
+                    # SCOPE ENFORCEMENT
+                    # Checked before the function is looked up and run, so
+                    # an under-scoped caller never reaches the tool body.
+                    # Fails closed: a 403 here becomes isError rather than a
+                    # successful-looking result.
+                    # ==========================================
+                    require_scopes(user_context, tool_scopes.get(tool_name, []))
+                    
                     # ==========================================
                     # CONTEXT INJECTION
                     # If the tool function has a 'user' parameter, inject it!

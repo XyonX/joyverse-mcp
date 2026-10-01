@@ -27,3 +27,17 @@ class MCPServerInfo(BaseModel):
 class MCPCapabilities(BaseModel):
     """Capabilities declared during initialize."""
     tools: Dict[str, Any] = Field(default_factory=lambda: {})
+
+
+class MCPOAuthMetadata(BaseModel):
+    """RFC 9728 OAuth 2.0 Protected Resource Metadata.
+
+    `authorization_servers` is omitted when this server is also its own
+    authorization server, which the RFC requires: the field is only present
+    when the AS lives elsewhere.
+    """
+    resource: str
+    authorization_servers: Optional[List[str]] = None
+    scopes_supported: Optional[List[str]] = None
+    bearer_methods_supported: Optional[List[str]] = None
+    resource_documentation: Optional[str] = None
