@@ -20,11 +20,14 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
-os.environ.setdefault("JWT_SECRET", "test-secret-not-a-real-one")
 
 from dotenv import load_dotenv  # noqa: E402
+# Load the real .env BEFORE falling back. setdefault() only fills a missing key,
+# so doing it first would pin the test secret and load_dotenv would then leave it
+# in place -- every run would mint tokens the hosted server rejects with 401.
 load_dotenv(REPO_ROOT / ".env")
 load_dotenv(Path(__file__).resolve().parent / ".env")
+os.environ.setdefault("JWT_SECRET", "test-secret-not-a-real-one")
 
 import jwt as pyjwt  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
@@ -92,6 +95,47 @@ class MCPClient:
         payload = result.get("result", {})
         text = "".join(b.get("text", "") for b in payload.get("content", []))
         return {"text": text, "isError": payload.get("isError", False)}
+
+
+class RemoteMCPClient(MCPClient):
+    """Same JSON-RPC-over-SSE client, pointed at a hosted server over HTTP.
+
+    Used to exercise a deployed instance (e.g. https://host/mcp) instead of the
+    in-process ASGI app. Only __init__ differs from MCPClient -- the SSE frame
+    parsing, tool dispatch and conversation loop are inherited unchanged, so
+    local and remote runs exercise identical client code.
+    """
+
+    def __init__(self, url: str, token: str, timeout: float = 60.0):
+        import httpx
+
+        # /mcp is the full endpoint path; we post to it verbatim and keep the
+        # base bare so httpx does not try to resolve a relative "/mcp" itself.
+        self.url = url
+        self.token = token
+        self.written_keys = []
+        self.http = httpx.Client(timeout=timeout)
+
+    def _rpc(self, method, params=None, req_id=1):
+        body = {"jsonrpc": "2.0", "id": req_id, "method": method}
+        if params is not None:
+            body["params"] = params
+        resp = self.http.post(
+            self.url, json=body,
+            headers={
+                "Authorization": f"Bearer {self.token}",
+                # The server ignores this today, but the MCP spec requires the
+                # client to ask for an event stream -- send it so the request
+                # matches what a real spec-compliant client would send.
+                "Accept": "text/event-stream",
+            })
+        if resp.status_code != 200:
+            raise RuntimeError(f"{method} failed: HTTP {resp.status_code} "
+                               f"{resp.text[:200]}")
+        for line in resp.text.splitlines():
+            if line.startswith("data: "):
+                return json.loads(line[6:])
+        return None
 
 
 def to_openai_tools(tools):
@@ -178,22 +222,48 @@ def run_conversation(mcp: MCPClient, llm, tools, messages, dry_run=False):
 
 
 def main():
+    # Declared before any use of MAX_TOOL_ROUNDS below, including the --max-rounds
+    # help string, which Python resolves as a read of the global.
+    global MAX_TOOL_ROUNDS
+
     ap = argparse.ArgumentParser()
     ap.add_argument("--dry-run", action="store_true",
                     help="Execute the loop but never call real tools")
     ap.add_argument("--auto", action="store_true",
                     help="Run the full scripted conversation unattended")
     ap.add_argument("--message", help="Single message to send instead of --auto")
+    ap.add_argument("--url", help="Target a hosted server (e.g. "
+                                   "https://host/mcp) instead of the local app")
+    ap.add_argument("--user", help=f"Username to authenticate as "
+                                   f"(default: {TEST_USERNAME})")
+    ap.add_argument("--token", help="Use this JWT verbatim instead of minting "
+                                    "one from the local JWT_SECRET")
+    ap.add_argument("--max-rounds", type=int,
+                    help=f"Cap the tool-calling loop (default: {MAX_TOOL_ROUNDS})")
     args = ap.parse_args()
+
+    if args.max_rounds is not None:
+        MAX_TOOL_ROUNDS = args.max_rounds
+    username = args.user or TEST_USERNAME
 
     log("=" * 62)
     log("joyverse-mcp :: LLM client test", CYAN)
     log("=" * 62)
 
-    import run as app_module
     from joyverse.prompts import USER_DATA
 
-    client = MCPClient(app_module.server._app, mint_token(TEST_USERNAME))
+    if args.url:
+        # Remote mode: talk to a deployed server over real HTTP. Do NOT import
+        # run.py here -- it builds a local boto3 client we have no use for.
+        token = args.token or mint_token(username)
+        client = RemoteMCPClient(args.url, token)
+        log(f"target: {args.url} (remote)", CYAN)
+    else:
+        import run as app_module
+        token = args.token or mint_token(username)
+        client = MCPClient(app_module.server._app, token)
+        log("target: in-process app (local)", CYAN)
+
     info = client.initialize()
     log(f"server: {info['serverInfo']['name']} "
         f"v{info['serverInfo']['version']}")
@@ -201,7 +271,8 @@ def main():
 
     tools = client.list_tools()
     log(f"tools ({len(tools)}): {', '.join(t['name'] for t in tools)}", GREEN)
-    log(f"user: {TEST_USERNAME}")
+    log(f"user: {username}")
+    log(f"max tool rounds: {MAX_TOOL_ROUNDS}")
 
     if args.dry_run:
         log("\nDRY-RUN: tool calls will NOT be executed.", YELLOW)
@@ -221,7 +292,7 @@ def main():
     llm = OpenAI(**kwargs)
     log(f"llm: {MODEL} via {base_url or 'api.openai.com'}")
 
-    system = (f"{USER_DATA}\n\n---\n\nYou are helping {TEST_USERNAME}. "
+    system = (f"{USER_DATA}\n\n---\n\nYou are helping {username}. "
               f"Use the available tools to read and write their data.")
 
     persona_path = Path(__file__).resolve().parent / "persona.md"
@@ -238,7 +309,7 @@ def main():
             "role": "user",
             "content": (
                 f"Here is background information about me, the user "
-                f"{TEST_USERNAME}. Use your tools to store it properly: build "
+                f"{username}. Use your tools to store it properly: build "
                 f"my profile with update_profile, write my bio with "
                 f"update_bio, and create data logs for dsa, projects, skills "
                 f"and reading with update_data.\n\n{persona}"
