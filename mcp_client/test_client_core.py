@@ -65,15 +65,17 @@ class TestHandshake:
     def test_initialize_carries_instructions(self, client):
         assert client.initialize().get("instructions")
 
-    def test_lists_nine_tools(self, client):
-        assert len(client.list_tools()) == 9
+    def test_lists_ten_tools(self, client):
+        # Compared against the expected set rather than a bare count, so adding
+        # or removing a tool gives a readable diff instead of "10 != 9".
+        assert len(client.list_tools()) == 10
 
     def test_tool_names_match_the_server(self, client):
         names = {t["name"] for t in client.list_tools()}
         assert names == {
             "get_profile", "update_profile", "get_bio", "update_bio",
             "get_memory", "add_memory_trait", "update_focus",
-            "get_data", "update_data"}
+            "get_data", "list_topics", "update_data"}
 
     def test_bad_token_is_rejected(self, app):
         bad = mc.MCPClient(app, "not-a-jwt")
@@ -207,8 +209,9 @@ class TestToolCallLoop:
 
     def test_tools_are_passed_to_the_llm(self, client):
         llm, calls = self._stub(["done"])
-        mc.run_conversation(client, llm, client.list_tools(), self._turn(client))
-        assert len(calls[0]["tools"]) == 9
+        tools = client.list_tools()
+        mc.run_conversation(client, llm, tools, self._turn(client))
+        assert len(calls[0]["tools"]) == len(tools)
 
     def test_malformed_arguments_do_not_crash(self, client):
         bad = types.SimpleNamespace(name="get_profile", arguments="{not json")

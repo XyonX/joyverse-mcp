@@ -64,6 +64,31 @@ class FakeR2:
                           "Body": Body, "ContentType": ContentType})
         return {}
 
+    def delete_object(self, Bucket=None, Key=None):
+        self.store.pop(Key, None)
+        return {}
+
+    def delete_objects(self, Bucket=None, Delete=None):
+        for obj in (Delete or {}).get("Objects", []):
+            self.store.pop(obj.get("Key"), None)
+        return {"Deleted": (Delete or {}).get("Objects", [])}
+
+    def list_objects_v2(self, Bucket=None, Prefix="", MaxKeys=1000):
+        """List stored keys under a prefix.
+
+        Needed by joyverse.data.list_topics and by the get_data miss path,
+        which enumerates a user's topics to build a helpful error.
+        """
+        import datetime
+
+        contents = [
+            {"Key": k, "Size": len(v),
+             "LastModified": datetime.datetime(2026, 1, 1)}
+            for k, v in self.store.items() if k.startswith(Prefix)
+        ]
+        contents.sort(key=lambda o: o["Key"])
+        return {"Contents": contents[:MaxKeys], "KeyCount": len(contents)}
+
     def seed(self, key, content):
         """Pre-populate an object (str or bytes)."""
         if isinstance(content, str):

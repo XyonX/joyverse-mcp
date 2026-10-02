@@ -19,7 +19,7 @@ def build_server():
     from joyverse.profile import get_profile, update_profile
     from joyverse.bio import get_bio, update_bio
     from joyverse.memory import get_memory, add_memory_trait, update_focus
-    from joyverse.data import get_data, update_data
+    from joyverse.data import get_data, update_data, list_topics
     from joyverse.prompts import USER_DATA
 
     srv = MCPServer(
@@ -34,6 +34,7 @@ def build_server():
     srv.tool(description="Add a personality trait to memory")(add_memory_trait)
     srv.tool(description="Update the current main focus")(update_focus)
     srv.tool(description="Get structured data logs by topic")(get_data)
+    srv.tool(description="List stored data topics")(list_topics)
     srv.tool(description="Update structured data logs for a topic")(update_data)
     return srv
 
@@ -96,12 +97,12 @@ class TestHandshake:
         res = sse_rpc(app, "initialize", token=tok)
         assert res["result"]["serverInfo"]["name"] == "joyverse-mcp"
 
-    def test_all_nine_tools_registered(self, app, sse_rpc, tok):
+    def test_all_ten_tools_registered(self, app, sse_rpc, tok):
         tools = sse_rpc(app, "tools/list", token=tok)["result"]["tools"]
         assert {t["name"] for t in tools} == {
             "get_profile", "update_profile", "get_bio", "update_bio",
             "get_memory", "add_memory_trait", "update_focus",
-            "get_data", "update_data"}
+            "get_data", "list_topics", "update_data"}
 
     def test_instructions_reach_the_client(self, app, sse_rpc, tok):
         res = sse_rpc(app, "initialize", token=tok)
@@ -293,12 +294,12 @@ class TestProtocolEdgeCases:
 class TestRunPySmoke:
     """Guards the actual run.py wiring, which the fixtures bypass."""
 
-    def test_run_module_registers_all_nine_tools(self):
+    def test_run_module_registers_all_ten_tools(self):
         import run
         assert {s.name for s in run.server._tool_schemas} == {
             "get_profile", "update_profile", "get_bio", "update_bio",
             "get_memory", "add_memory_trait", "update_focus",
-            "get_data", "update_data"}
+            "get_data", "list_topics", "update_data"}
 
     def test_run_module_carries_instructions(self):
         import run
