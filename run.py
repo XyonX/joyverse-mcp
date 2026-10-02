@@ -8,7 +8,7 @@ from joyverse import config as jv_config
 from joyverse.profile import get_profile, update_profile
 from joyverse.bio import get_bio, update_bio
 from joyverse.memory import get_memory, add_memory_trait, update_focus
-from joyverse.data import get_data, update_data, list_topics
+from joyverse.data import get_data, list_topics, edit_data, replace_data
 from joyverse.prompts import USER_DATA
 from joyverse import auth as jv_auth
 
@@ -101,8 +101,26 @@ server.tool(description=(
     "List every stored data topic with its description. Call this FIRST when "
     "you do not know which topics exist, rather than guessing a topic name."),
     scopes=[READ_SCOPE])(list_topics)
-server.tool(description="Update structured data logs for a topic",
-            scopes=[WRITE_SCOPE])(update_data)
+# edit_data is the safe default for changing a data log. The description
+# spells out the addressing rule, because an agent that reaches for an array
+# index will edit the wrong item the moment anything is added or removed.
+server.tool(description=(
+    "Make a targeted change to one data log without disturbing anything else. "
+    "Choose op: set = change fields; add = insert a new item into an array; "
+    "remove = delete the item that matches `match`; append = add entries to a "
+    "list inside the matched item. Address items by matching a field such as "
+    "{\"name\": \"OmniHome\"}, NEVER by array index -- indices shift when "
+    "items are added or removed. Always call get_data first so you use the "
+    "exact existing names."),
+    scopes=[WRITE_SCOPE])(edit_data)
+
+server.tool(description=(
+    "DESTRUCTIVE: overwrites a whole data log with what you send, so "
+    "anything you omit is DELETED. Only for a deliberate full rewrite, such "
+    "as a first write or a complete restructure. For any partial change use "
+    "edit_data instead. Refuses the write if it would drop existing keys "
+    "unless you pass allow_drop."),
+    scopes=[WRITE_SCOPE])(replace_data)
 
 
 if __name__ == "__main__":
