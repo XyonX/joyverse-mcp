@@ -123,5 +123,116 @@ server.tool(description=(
     scopes=[WRITE_SCOPE])(replace_data)
 
 
+# ==========================================
+# RESOURCES
+#
+# Tools are actions the caller invokes; resources are addressable things a
+# client reads. Both matter here: tools are what an agent drives, while
+# resources let a client BROWSE the data and decide what belongs in context
+# using the priority and audience annotations.
+#
+# A custom scheme rather than https:// because the spec reserves https:// for
+# resources a client can fetch itself -- ours require auth through the server.
+# ==========================================
+
+@server.resource(
+    "joyverse://profile", name="Profile", title="Personal profile",
+    description="Identity snapshot: name, location, occupation, and any "
+                "other sections kept here.",
+    mime_type="text/markdown", priority=0.9,
+    audience=["user", "assistant"], scopes=[READ_SCOPE])
+def read_profile_resource(user: dict) -> str:
+    return get_profile(user)
+
+
+@server.resource(
+    "joyverse://bio", name="Biography", title="Life narrative",
+    description="The user's story in their own words, grouped into sections.",
+    mime_type="text/markdown", priority=0.8,
+    audience=["user", "assistant"], scopes=[READ_SCOPE])
+def read_bio_resource(user: dict) -> str:
+    return get_bio(user)
+
+
+@server.resource(
+    "joyverse://memory", name="Memory", title="User memory model",
+    description="Personality traits, observed patterns, stated preferences "
+                "and current focus.",
+    mime_type="application/json", priority=0.9,
+    audience=["assistant"], scopes=[READ_SCOPE])
+def read_memory_resource(user: dict) -> str:
+    return get_memory(user)
+
+
+@server.resource(
+    "joyverse://topics", name="Topic catalogue", title="Available data topics",
+    description="Every stored data topic with a description of what it holds. "
+                "Read this before fetching a topic you were not given.",
+    mime_type="application/json", priority=0.7,
+    audience=["assistant"], scopes=[READ_SCOPE])
+def read_topics_resource(user: dict) -> str:
+    return list_topics(user)
+
+
+@server.resource_template(
+    "joyverse://data/{topic}", name="Data log", title="Structured data log",
+    description="One stored topic, e.g. joyverse://data/dsa. Call "
+                "joyverse://topics first to see which exist.",
+    mime_type="application/json", priority=0.5,
+    audience=["assistant"], scopes=[READ_SCOPE])
+def read_data_resource(uri: str, user: dict) -> str:
+    # The topic comes from the URI, but it is passed through get_data, which
+    # sanitises it. The user_id in the storage key comes from the auth
+    # context, never from the URI, so a crafted URI cannot reach another
+    # account's data.
+    topic = uri.rsplit("/", 1)[-1]
+    return get_data(topic, user)
+
+
+def _live_data_topics(user: dict) -> list:
+    """Contribute one resource per topic the caller actually owns.
+
+    Without this a browsing client sees only the template and has to guess
+    URIs; with it the tree matches the caller's real data.
+    """
+    from joyverse.data import _topic_names, _describe, _topic_from_key, _data_prefix
+    from joyverse.config import r2_client as _r2, BUCKET_NAME as _bucket
+
+    try:
+        user_id = user["user_id"]
+        prefix = _data_prefix(user_id)
+        listing = _r2.list_objects_v2(Bucket=_bucket, Prefix=prefix)
+    except Exception:
+        return []
+
+    out = []
+    for name in _topic_names(user["user_id"]):
+        description = ""
+        size = 0
+        try:
+            for obj in listing.get("Contents", []):
+                if _topic_from_key(obj.get("Key", ""), prefix) == name:
+                    body = _r2.get_object(Bucket=_bucket,
+                                          Key=obj["Key"])["Body"].read().decode()
+                    description = _describe(body)
+                    size = obj.get("Size", 0)
+                    break
+        except Exception:
+            pass
+        out.append({
+            "uri": f"joyverse://data/{name}",
+            "name": name,
+            "title": name.replace("_", " ").title(),
+            "description": description or f"Structured data log: {name}",
+            "mimeType": "application/json",
+            "size": size,
+            "annotations": {"audience": ["assistant"], "priority": 0.5},
+        })
+    return out
+
+
+server.resources.set_lister(_live_data_topics)
+
+
 if __name__ == "__main__":
     server.run(port=8001)
