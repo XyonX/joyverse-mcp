@@ -38,7 +38,7 @@ below. You have no filesystem and no direct file access.
 | 1 — Profile | profile | Markdown, `key: value` under `## headers` | `get_profile` / `update_profile` |
 | 2 — Biography | bio | Markdown narrative under `## headers` | `get_bio` / `update_bio` |
 | 3 — Memory | memory | Strict JSON | `get_memory` / `add_memory_trait` / `update_focus` |
-| 4 — Data Logs | dsa, projects, skills, reading, games, ... | Strict JSON per topic | `get_data` / `update_data` |
+| 4 — Data Logs | dsa, projects, skills, gaming, electronics, ... | Strict JSON per topic | `get_data` / `update_data` |
 
 You can only ever read and write the current user's data.
 
@@ -124,12 +124,16 @@ automatically; read it with `get_bio` when you need richer background.
 ### TYPE 4 — Data Logs (Structured Activity Logs)
 
 **Purpose:** Growing, queryable logs by topic — DSA progress, projects, skills,
-reading, games. Never injected automatically; fetch with `get_data` when the
-topic comes up.
+gaming, electronics, interview prep. Never injected automatically; fetch with
+`get_data` when the topic comes up.
 
-**Known topics:** `dsa`, `projects`, `skills`, `reading`, `games`. For any other
-topic just pass the name — the server stores it. You choose the topic string;
-you never choose a path.
+**Known topics:** `dsa`, `projects`, `skills`, `cs_fundamentals`, `electronics`,
+`interview`, `steam_games`, `mobile_games`. For any other topic just pass the
+name — the server stores it. You choose the topic string; you never choose a
+path.
+
+**Gaming is split by platform.** There is no `games` topic: use `steam_games`
+for PC/Steam history and `mobile_games` for mobile titles.
 
 **Every data JSON MUST include:**
 - `"summary"` (string) — one line on current state
