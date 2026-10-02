@@ -20,6 +20,9 @@ def build_server():
     from joyverse.bio import get_bio, update_bio
     from joyverse.memory import get_memory, add_memory_trait, update_focus
     from joyverse.data import get_data, list_topics, edit_data, replace_data
+    from joyverse.storage import (
+        register_client, list_clients, save_file_from_url, save_file_text,
+        get_file, list_files, delete_file)
     from joyverse.prompts import USER_DATA
 
     srv = MCPServer(
@@ -37,6 +40,13 @@ def build_server():
     srv.tool(description="List stored data topics")(list_topics)
     srv.tool(description="Edit one data log in place")(edit_data)
     srv.tool(description="Replace a whole data log")(replace_data)
+    srv.tool(description="Claim a client name for file storage")(register_client)
+    srv.tool(description="List registered client names")(list_clients)
+    srv.tool(description="Store a file from a URL")(save_file_from_url)
+    srv.tool(description="Store text as a file")(save_file_text)
+    srv.tool(description="Get a download link for a stored file")(get_file)
+    srv.tool(description="List stored files")(list_files)
+    srv.tool(description="Delete a stored file")(delete_file)
     return srv
 
 
@@ -98,12 +108,14 @@ class TestHandshake:
         res = sse_rpc(app, "initialize", token=tok)
         assert res["result"]["serverInfo"]["name"] == "joyverse-mcp"
 
-    def test_all_eleven_tools_registered(self, app, sse_rpc, tok):
+    def test_all_tools_registered(self, app, sse_rpc, tok):
         tools = sse_rpc(app, "tools/list", token=tok)["result"]["tools"]
         assert {t["name"] for t in tools} == {
             "get_profile", "update_profile", "get_bio", "update_bio",
             "get_memory", "add_memory_trait", "update_focus",
-            "get_data", "list_topics", "edit_data", "replace_data"}
+            "get_data", "list_topics", "edit_data", "replace_data",
+            "register_client", "list_clients", "save_file_from_url",
+            "save_file_text", "get_file", "list_files", "delete_file"}
 
     def test_instructions_reach_the_client(self, app, sse_rpc, tok):
         res = sse_rpc(app, "initialize", token=tok)
@@ -295,12 +307,14 @@ class TestProtocolEdgeCases:
 class TestRunPySmoke:
     """Guards the actual run.py wiring, which the fixtures bypass."""
 
-    def test_run_module_registers_all_ten_tools(self):
+    def test_run_module_registers_all_tools(self):
         import run
         assert {s.name for s in run.server._tool_schemas} == {
             "get_profile", "update_profile", "get_bio", "update_bio",
             "get_memory", "add_memory_trait", "update_focus",
-            "get_data", "list_topics", "edit_data", "replace_data"}
+            "get_data", "list_topics", "edit_data", "replace_data",
+            "register_client", "list_clients", "save_file_from_url",
+            "save_file_text", "get_file", "list_files", "delete_file"}
 
     def test_run_module_carries_instructions(self):
         import run
@@ -624,3 +638,104 @@ class TestOAuthAndLegacyCoexist:
     async def test_discovery_still_works(self, combined):
         assert combined.get(
             "/.well-known/oauth-protected-resource/mcp").status_code == 200
+
+
+class TestFileToolsOverMCP:
+    """File tools through the real JSON-RPC layer.
+
+    The storage unit tests call the functions directly. These go over the wire
+    instead, which is the only way to catch the injected `user` argument being
+    accepted from a caller, or a tool wired up with no scope.
+    """
+
+    def test_cannot_forge_user_by_passing_it(self, app, tok):
+        """A caller must not be able to name another user in arguments."""
+        res = call(app, "list_clients", {"user": {"user_id": "u_someone_else"}},
+                   token=tok)
+        text = text_of(res)
+        assert '"error"' in text or '"count": 0' in text
+
+    def test_register_save_and_fetch_round_trip(self, app, tok):
+        res = call(app, "register_client", {"name": "chatgpt"}, token=tok)
+        assert json.loads(text_of(res))["ok"] is True
+
+        res = call(app, "save_file_text",
+                   {"path": "notes/hello.txt", "content": "hi there",
+                    "client": "chatgpt"}, token=tok)
+        assert json.loads(text_of(res))["ok"] is True
+
+        res = call(app, "get_file", {"path": "notes/hello.txt",
+                                     "client": "chatgpt"}, token=tok)
+        got = json.loads(text_of(res))
+        assert got["ok"] is True
+        assert got["url"].startswith("https://")
+
+        res = call(app, "list_files", {"client": "chatgpt"}, token=tok)
+        listed = json.loads(text_of(res))
+        assert listed["files"][0]["path"] == "notes/hello.txt"
+
+    def test_two_clients_share_the_users_store(self, app, tok):
+        """Cross-client handoff: one client sees what another stored."""
+        call(app, "register_client", {"name": "chatgpt"}, token=tok)
+        call(app, "register_client", {"name": "claude"}, token=tok)
+        call(app, "save_file_text",
+             {"path": "shared.txt", "content": "from chatgpt",
+              "client": "chatgpt"}, token=tok)
+
+        res = call(app, "list_files", {}, token=tok)
+        paths = {f["path"] for f in json.loads(text_of(res))["files"]}
+        assert "chatgpt/shared.txt" in paths
+
+    def test_traversal_rejected_over_mcp(self, app, tok):
+        call(app, "register_client", {"name": "chatgpt"}, token=tok)
+        res = call(app, "save_file_text",
+                   {"path": "../../escape.txt", "content": "x",
+                    "client": "chatgpt"}, token=tok)
+        assert '"error"' in text_of(res)
+
+    def test_ssrf_rejected_over_mcp(self, app, tok):
+        call(app, "register_client", {"name": "chatgpt"}, token=tok)
+        res = call(app, "save_file_from_url",
+                   {"url": "http://169.254.169.254/latest/meta-data/",
+                    "path": "x.txt", "client": "chatgpt"}, token=tok)
+        assert '"error"' in text_of(res)
+
+    def test_delete_removes_file(self, app, tok):
+        call(app, "register_client", {"name": "chatgpt"}, token=tok)
+        call(app, "save_file_text",
+             {"path": "gone.txt", "content": "x", "client": "chatgpt"},
+             token=tok)
+        res = call(app, "delete_file", {"path": "gone.txt",
+                                        "client": "chatgpt"}, token=tok)
+        assert json.loads(text_of(res))["ok"] is True
+        res = call(app, "list_files", {"client": "chatgpt"}, token=tok)
+        assert json.loads(text_of(res))["files"] == []
+
+    def test_two_users_cannot_see_each_other(self, app, tok, make_token):
+        """The core isolation guarantee, over the wire.
+
+        `alice` resolves to a different user_id than `joydip`, so her token
+        must reach a different storage root entirely.
+        """
+        call(app, "register_client", {"name": "chatgpt"}, token=tok)
+        call(app, "save_file_text",
+             {"path": "private.txt", "content": "mine", "client": "chatgpt"},
+             token=tok)
+
+        other = make_token("alice", secret=TEST_SECRET)
+        res = call(app, "list_files", {}, token=other)
+        assert json.loads(text_of(res))["files"] == []
+
+        res = call(app, "get_file", {"path": "private.txt",
+                                     "client": "chatgpt"}, token=other)
+        assert '"error"' in text_of(res)
+
+    def test_file_tools_require_auth(self, app):
+        for name, args in [("list_files", {}),
+                           ("list_clients", {}),
+                           ("get_file", {"path": "a", "client": "chatgpt"})]:
+            r = app.post("/mcp", json={"jsonrpc": "2.0", "id": 1,
+                                       "method": "tools/call",
+                                       "params": {"name": name,
+                                                  "arguments": args}})
+            assert r.status_code == 401, f"{name} was reachable unauthenticated"

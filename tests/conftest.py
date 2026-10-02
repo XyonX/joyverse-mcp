@@ -56,12 +56,19 @@ class FakeR2:
             raise NoSuchKey(f"NoSuchKey: The specified key does not exist. {Key}")
         return {"Body": io.BytesIO(self.store[Key])}
 
-    def put_object(self, Bucket, Key, Body, ContentType=None):
+    def put_object(self, Bucket, Key, Body, ContentType=None, Metadata=None):
         if isinstance(Body, str):
             Body = Body.encode("utf-8")
+        elif hasattr(Body, "read"):
+            # Streaming upload: the storage tools hand boto3 a file-like
+            # object so a large file is never fully buffered. FakeR2 must
+            # consume it the same way, or tests would pass while production
+            # silently buffered 500 MB.
+            Body = Body.read()
         self.store[Key] = Body
         self.puts.append({"Bucket": Bucket, "Key": Key,
-                          "Body": Body, "ContentType": ContentType})
+                          "Body": Body, "ContentType": ContentType,
+                          "Metadata": Metadata})
         return {}
 
     def delete_object(self, Bucket=None, Key=None):
@@ -73,7 +80,28 @@ class FakeR2:
             self.store.pop(obj.get("Key"), None)
         return {"Deleted": (Delete or {}).get("Objects", [])}
 
-    def list_objects_v2(self, Bucket=None, Prefix="", MaxKeys=1000):
+    def head_object(self, Bucket=None, Key=None):
+        if Key not in self.store:
+            raise NoSuchKey(f"NoSuchKey: {Key}")
+        import datetime
+
+        ctype = "application/json"
+        for put in self.puts:
+            if put["Key"] == Key:
+                ctype = put.get("ContentType") or ctype
+        return {"ContentLength": len(self.store[Key]),
+                "ContentType": ctype,
+                "LastModified": datetime.datetime(2026, 1, 1)}
+
+    def generate_presigned_url(self, *a, **kw):
+        # FakeR2 does not sign; a stable marker is enough because the tools
+        # only hand the URL back to the caller.
+        params = kw.get("Params") or {}
+        return (f"https://fake.invalid/{params.get('Bucket')}"
+                f"/{params.get('Key')}?signed=1")
+
+    def list_objects_v2(self, Bucket=None, Prefix="", MaxKeys=1000,
+                       ContinuationToken=None):
         """List stored keys under a prefix.
 
         Needed by joyverse.data.list_topics and by the get_data miss path,
@@ -87,7 +115,21 @@ class FakeR2:
             for k, v in self.store.items() if k.startswith(Prefix)
         ]
         contents.sort(key=lambda o: o["Key"])
-        return {"Contents": contents[:MaxKeys], "KeyCount": len(contents)}
+        # Real S3 pages at 1000 and sets IsTruncated; the usage scan loops on
+        # that, so FakeR2 has to reproduce it or the loop goes untested.
+        # Resume after the token, mirroring S3 semantics.
+        if ContinuationToken:
+            keys = [c["Key"] for c in contents]
+            start = keys.index(ContinuationToken) + 1 \
+                if ContinuationToken in keys else 0
+            contents = contents[start:]
+        page = contents[:MaxKeys]
+        truncated = len(contents) > MaxKeys
+        out = {"Contents": page, "KeyCount": len(page),
+               "IsTruncated": truncated}
+        if truncated:
+            out["NextContinuationToken"] = page[-1]["Key"]
+        return out
 
     def seed(self, key, content):
         """Pre-populate an object (str or bytes)."""
@@ -133,6 +175,21 @@ def _isolate_r2_by_default(no_network_guard):
     return no_network_guard
 
 
+@pytest.fixture(autouse=True)
+def _clear_storage_cache():
+    """Drop the module-global usage cache between tests.
+
+    `_USAGE_CACHE` is keyed only by user_id and lives for the whole process, so
+    without this one test's stored bytes satisfy the next test's quota check.
+    A limit test that passes alone and fails in the suite is the signature of
+    exactly this leak.
+    """
+    from joyverse import storage
+    storage._USAGE_CACHE.clear()
+    yield
+    storage._USAGE_CACHE.clear()
+
+
 @pytest.fixture
 def fake_r2(monkeypatch, no_network_guard):
     """Patch the r2_client reference into every module that imported it.
@@ -143,7 +200,8 @@ def fake_r2(monkeypatch, no_network_guard):
     fake = FakeR2()
     # identity was added later; it imports r2_client too and must be patched
     # or the registry would be read from and written to the real bucket.
-    modules = ["config", "profile", "bio", "memory", "data", "identity"]
+    modules = ["config", "profile", "bio", "memory", "data", "identity",
+               "storage"]
     for name in modules:
         mod = __import__(f"joyverse.{name}", fromlist=["r2_client"])
         monkeypatch.setattr(mod, "r2_client", fake, raising=False)
