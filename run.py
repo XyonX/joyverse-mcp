@@ -9,6 +9,10 @@ from joyverse.profile import get_profile, update_profile
 from joyverse.bio import get_bio, update_bio
 from joyverse.memory import get_memory, add_memory_trait, update_focus
 from joyverse.data import get_data, list_topics, edit_data, replace_data
+from joyverse.storage import (
+    register_client, list_clients, save_file_from_url, save_file_text,
+    get_file, list_files, delete_file,
+)
 from joyverse.prompts import USER_DATA
 from joyverse import auth as jv_auth
 
@@ -121,6 +125,56 @@ server.tool(description=(
     "edit_data instead. Refuses the write if it would drop existing keys "
     "unless you pass allow_drop."),
     scopes=[WRITE_SCOPE])(replace_data)
+
+
+# ==========================================
+# FILES
+#
+# A private per-user store. Clients (chatgpt, claude, hermes) each get their
+# own folder and can hand files to one another: one agent saves an image, a
+# different one fetches it. Sub-folders inside a client are free-form.
+# ==========================================
+
+server.tool(description=(
+    "Claim a client name so it can save and fetch files. Call this once per "
+    "agent before any file tool; the name becomes your storage folder and is "
+    "yours alone -- another user may hold the same name with no overlap. "
+    "Pick a stable name you will keep using."),
+    scopes=[WRITE_SCOPE])(register_client)
+
+server.tool(description=(
+    "List the client names you have registered, with their storage folders."),
+    scopes=[READ_SCOPE])(list_clients)
+
+server.tool(description=(
+    "Download a public URL and store the file for later. Use this for any file "
+    "type -- image, document, audio, video. Saves into your client's folder "
+    "under `path`, where sub-folders like images/ or renders/ are yours to "
+    "organise. Refuses private and internal addresses, oversized files, and "
+    "links that resolve to a sign-in page rather than the file."),
+    scopes=[WRITE_SCOPE])(save_file_from_url)
+
+server.tool(description=(
+    "Save text you produced yourself as a file -- notes, JSON, code, a summary "
+    "-- without going through a URL. Use save_file_from_url instead when the "
+    "content already exists somewhere fetchable."),
+    scopes=[WRITE_SCOPE])(save_file_text)
+
+server.tool(description=(
+    "Get a temporary download link for a file you stored earlier. The link is "
+    "signed and expires in 7 days; call again for a fresh one. Use this to "
+    "read a file another client saved."),
+    scopes=[READ_SCOPE])(get_file)
+
+server.tool(description=(
+    "List stored files and your storage usage. Pass client to list one "
+    "client's files, or omit it to list everything you have stored."),
+    scopes=[READ_SCOPE])(list_files)
+
+server.tool(description=(
+    "DESTRUCTIVE: permanently deletes a stored file and frees its space. There "
+    "is no undo and no trash -- confirm with the user first."),
+    scopes=[WRITE_SCOPE])(delete_file)
 
 
 # ==========================================

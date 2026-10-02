@@ -51,6 +51,16 @@ class _R2ClientProxy:
         # the method.
         return get_r2_client().list_objects_v2(**kwargs)
 
+    def head_object(self, **kwargs):
+        # Metadata only, so get_file can report size and type without
+        # downloading the object.
+        return get_r2_client().head_object(**kwargs)
+
+    def generate_presigned_url(self, *args, **kwargs):
+        # Share links. The object stays private; only the signature grants
+        # time-limited access.
+        return get_r2_client().generate_presigned_url(*args, **kwargs)
+
     def delete_object(self, **kwargs):
         return get_r2_client().delete_object(**kwargs)
 
@@ -175,3 +185,33 @@ def resource_url() -> str:
             "PUBLIC_BASE_URL is not set. Add it to .env to advertise "
             "OAuth discovery metadata.")
     return f"{PUBLIC_BASE_URL}/mcp"
+
+# ==========================================
+# FILE STORAGE LIMITS
+# ==========================================
+# Pooled across every client: there is no per-client cap, so one client
+# producing gigabytes does not starve the others.
+STORAGE_ROOT = "storage"
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read a byte-count limit from the environment."""
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        return default
+    return value if value > 0 else default
+
+
+MB = 1024 * 1024
+GB = 1024 * MB
+
+MAX_FILE_BYTES = _env_int("JOYVERSE_MAX_FILE_MB", 500) * MB
+MAX_USER_BYTES = _env_int("JOYVERSE_MAX_USER_GB", 50) * GB
+
+# Guards for server-side URL fetches.
+FETCH_TIMEOUT_SECONDS = _env_int("JOYVERSE_FETCH_TIMEOUT", 30)
+MAX_REDIRECTS = 5
