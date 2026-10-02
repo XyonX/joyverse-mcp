@@ -21,6 +21,12 @@ from tests.conftest import (  # noqa: F401,E402
     client_factory,
     fake_r2,
     make_token,
+    no_network_guard,
     sse_rpc,
     valid_token,
 )
+
+# Autouse guard against tests reaching the real R2 bucket. Must be re-exported
+# here too, or tests outside tests/ (e.g. mcp_client/) cannot resolve it and
+# error at fixture setup.
+from tests.conftest import _isolate_r2_by_default  # noqa: F401,E402

@@ -75,7 +75,41 @@ class FakeR2:
 
 
 @pytest.fixture
-def fake_r2(monkeypatch):
+def no_network_guard(monkeypatch):
+    """Make any test that reaches the real R2 bucket fail loudly.
+
+    This exists because a test once authenticated through the real
+    `run.server._auth_dependency` without requesting `fake_r2`. That silently
+    wrote a user into the production bucket -- about ninety of them, including
+    person0..person49 -- and they only became visible when the registry was
+    inspected by hand.
+
+    `joyverse.config.r2_client` is a proxy that calls `get_r2_client()` on every
+    call, so raising there blocks the real client for the whole session while
+    leaving the proxy (and therefore `fake_r2`) fully working.
+    """
+    def _refuse():
+        raise RuntimeError(
+            "A test tried to reach the real Cloudflare R2 bucket. "
+            "Request the `fake_r2` fixture so writes are captured in memory."
+        )
+
+    monkeypatch.setattr(jv_config, "get_r2_client", _refuse)
+    monkeypatch.setattr(jv_config, "_r2_client", None, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_r2_by_default(no_network_guard):
+    """Apply the guard to every test in the session.
+
+    Autouse, because the failure mode it prevents is silent: a test that
+    forgets `fake_r2` still passes, just against real storage.
+    """
+    return no_network_guard
+
+
+@pytest.fixture
+def fake_r2(monkeypatch, no_network_guard):
     """Patch the r2_client reference into every module that imported it.
 
     Each module did `from joyverse.config import r2_client`, so rebinding

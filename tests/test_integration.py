@@ -318,7 +318,12 @@ class TestRunPySmoke:
         # Exercised end to end: a self-issued token must still authenticate.
         assert chain is not None
 
-    def test_bearer_token_works_through_the_real_wiring(self):
+    def test_bearer_token_works_through_the_real_wiring(self, fake_r2):
+        # fake_r2 is REQUIRED here. run.server._auth_dependency resolves the
+        # handle through the identity registry, so without the fixture this
+        # writes a user into the REAL bucket -- which is exactly how ~90 test
+        # users polluted production. The no_network_guard fixture turns any such
+        # mistake into a loud failure rather than a silent write.
         import run
         from conftest import TEST_SECRET
         import jwt as pyjwt
@@ -334,6 +339,9 @@ class TestRunPySmoke:
         ctx = run.server._auth_dependency(
             Req({"Authorization": f"Bearer {token}"}))
         assert ctx["user_id"]
+        # and it landed in the fake, not production
+        assert any(k.startswith("users/_registry/")
+                   for k in fake_r2.store)
 
     def test_oauth_is_only_wired_when_configured(self):
         import run
