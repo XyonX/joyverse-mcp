@@ -32,10 +32,30 @@ def get_r2_client():
 # For backward compat with tests that monkeypatch r2_client
 # Use a callable that can be replaced
 class _R2ClientProxy:
+    """Forwards the S3 calls joyverse makes to the lazily-built real client.
+
+    Each method resolves the client at call time rather than holding one, so
+    the R2-free startup behaviour (and the test fixtures) still work.
+    """
+
     def get_object(self, **kwargs):
         return get_r2_client().get_object(**kwargs)
+
     def put_object(self, **kwargs):
         return get_r2_client().put_object(**kwargs)
+
+    def list_objects_v2(self, **kwargs):
+        # Needed by list_topics and by get_data's miss path, both of which
+        # enumerate a user's topics. Omitting this made topic discovery fail
+        # against real R2 while passing every test, because FakeR2 always had
+        # the method.
+        return get_r2_client().list_objects_v2(**kwargs)
+
+    def delete_object(self, **kwargs):
+        return get_r2_client().delete_object(**kwargs)
+
+    def delete_objects(self, **kwargs):
+        return get_r2_client().delete_objects(**kwargs)
 
 r2_client = _R2ClientProxy()
 

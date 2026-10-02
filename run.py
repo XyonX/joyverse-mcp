@@ -8,7 +8,7 @@ from joyverse import config as jv_config
 from joyverse.profile import get_profile, update_profile
 from joyverse.bio import get_bio, update_bio
 from joyverse.memory import get_memory, add_memory_trait, update_focus
-from joyverse.data import get_data, update_data
+from joyverse.data import get_data, update_data, list_topics
 from joyverse.prompts import USER_DATA
 from joyverse import auth as jv_auth
 
@@ -94,6 +94,13 @@ server.tool(description="Update the current main focus",
 # Data Logs
 server.tool(description="Get structured data logs by topic (e.g., dsa, projects)",
             scopes=[READ_SCOPE])(get_data)
+# Listed first in the description set: an agent must be able to discover which
+# topics exist before it can ask for one. Without it, callers guess names and
+# a wrong guess returns nothing they can recover from.
+server.tool(description=(
+    "List every stored data topic with its description. Call this FIRST when "
+    "you do not know which topics exist, rather than guessing a topic name."),
+    scopes=[READ_SCOPE])(list_topics)
 server.tool(description="Update structured data logs for a topic",
             scopes=[WRITE_SCOPE])(update_data)
 
