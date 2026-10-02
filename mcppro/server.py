@@ -6,6 +6,8 @@ import uvicorn
 from mcppro.auth import no_auth
 from mcppro.decorators import create_tool_decorator
 from mcppro.discovery import challenge_header
+from mcppro.resources import ResourceRegistry
+from mcppro.resources import ResourceRegistry
 from mcppro.router import route_request
 
 class MCPServer:
@@ -40,11 +42,91 @@ class MCPServer:
         # plain and nothing about OAuth leaks into the framework's behaviour.
         self._resource_url = resource_url
         
+        # Resources live in their own registry so the tool path stays untouched.
+        self.resources = ResourceRegistry()
+
+        # Resources live in their own registry so the tool path stays untouched.
+        self.resources = ResourceRegistry()
+
         # Create the @server.tool decorator bound to this instance
         self.tool = create_tool_decorator(self)
+
+        # Resource decorators, mirroring server.tool.
+        self.resource = self._make_resource_decorator()
+        self.resource_template = self._make_resource_template_decorator()
+
+        # Resource decorators, mirroring server.tool.
+        self.resource = self._make_resource_decorator()
+        self.resource_template = self._make_resource_template_decorator()
         
         # Create the FastAPI app
         self._app = self._create_app()
+
+    def _make_resource_decorator(self):
+        """Build the @server.resource decorator."""
+        def resource(uri: str, *, name: str = "", description: str = "",
+                     mime_type: str = "text/plain", title=None,
+                     size=None, priority=None, audience=None,
+                     last_modified=None, scopes=None):
+            def decorator(func):
+                self.resources.add_resource(
+                    uri, func, name=name, description=description,
+                    mime_type=mime_type, title=title, size=size,
+                    priority=priority, audience=audience,
+                    last_modified=last_modified, scopes=scopes)
+                return func
+            return decorator
+        return resource
+
+    def _make_resource_template_decorator(self):
+        """Build the @server.resource_template decorator."""
+        def resource_template(uri_template: str, *, name: str = "",
+                              description: str = "",
+                              mime_type: str = "text/plain", title=None,
+                              priority=None, audience=None,
+                              last_modified=None, scopes=None):
+            def decorator(func):
+                self.resources.add_template(
+                    uri_template, func, name=name, description=description,
+                    mime_type=mime_type, title=title, priority=priority,
+                    audience=audience, last_modified=last_modified,
+                    scopes=scopes)
+                return func
+            return decorator
+        return resource_template
+
+    def _make_resource_decorator(self):
+        """Build the @server.resource decorator."""
+        def resource(uri: str, *, name: str = "", description: str = "",
+                     mime_type: str = "text/plain", title=None,
+                     size=None, priority=None, audience=None,
+                     last_modified=None, scopes=None):
+            def decorator(func):
+                self.resources.add_resource(
+                    uri, func, name=name, description=description,
+                    mime_type=mime_type, title=title, size=size,
+                    priority=priority, audience=audience,
+                    last_modified=last_modified, scopes=scopes)
+                return func
+            return decorator
+        return resource
+
+    def _make_resource_template_decorator(self):
+        """Build the @server.resource_template decorator."""
+        def resource_template(uri_template: str, *, name: str = "",
+                              description: str = "",
+                              mime_type: str = "text/plain", title=None,
+                              priority=None, audience=None,
+                              last_modified=None, scopes=None):
+            def decorator(func):
+                self.resources.add_template(
+                    uri_template, func, name=name, description=description,
+                    mime_type=mime_type, title=title, priority=priority,
+                    audience=audience, last_modified=last_modified,
+                    scopes=scopes)
+                return func
+            return decorator
+        return resource_template
 
     def _create_app(self) -> FastAPI:
         """Builds the FastAPI application with MCP endpoint."""
@@ -101,7 +183,8 @@ class MCPServer:
                     tool_functions=self._tool_functions,
                     instructions=self.instructions,
                     user_context=user,
-                    tool_scopes=self._tool_scopes
+                    tool_scopes=self._tool_scopes,
+                    resource_registry=self.resources
                 ):
                     yield sse_chunk
             

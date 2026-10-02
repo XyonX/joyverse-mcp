@@ -9,15 +9,20 @@ def build_jsonrpc_response(req_id: int, result: Any) -> Dict:
         "result": result
     }
 
-def build_jsonrpc_error(req_id: int, code: int, message: str) -> Dict:
-    """Wraps an error in a JSON-RPC 2.0 error response."""
+def build_jsonrpc_error(req_id: int, code: int, message: str,
+                        data: Any = None) -> Dict:
+    """Wraps an error in a JSON-RPC 2.0 error response.
+
+    `data` is optional per RFC 8259 and is omitted when not supplied, so
+    responses keep exactly the shape they had before resources existed.
+    """
+    error = {"code": code, "message": message}
+    if data is not None:
+        error["data"] = data
     return {
         "jsonrpc": "2.0",
         "id": req_id,
-        "error": {
-            "code": code,
-            "message": message
-        }
+        "error": error
     }
 
 def format_sse(payload: Dict) -> str:
