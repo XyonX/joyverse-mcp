@@ -19,7 +19,7 @@ def build_server():
     from joyverse.profile import get_profile, update_profile
     from joyverse.bio import get_bio, update_bio
     from joyverse.memory import get_memory, add_memory_trait, update_focus
-    from joyverse.data import get_data, update_data, list_topics
+    from joyverse.data import get_data, list_topics, edit_data, replace_data
     from joyverse.prompts import USER_DATA
 
     srv = MCPServer(
@@ -35,7 +35,8 @@ def build_server():
     srv.tool(description="Update the current main focus")(update_focus)
     srv.tool(description="Get structured data logs by topic")(get_data)
     srv.tool(description="List stored data topics")(list_topics)
-    srv.tool(description="Update structured data logs for a topic")(update_data)
+    srv.tool(description="Edit one data log in place")(edit_data)
+    srv.tool(description="Replace a whole data log")(replace_data)
     return srv
 
 
@@ -97,12 +98,12 @@ class TestHandshake:
         res = sse_rpc(app, "initialize", token=tok)
         assert res["result"]["serverInfo"]["name"] == "joyverse-mcp"
 
-    def test_all_ten_tools_registered(self, app, sse_rpc, tok):
+    def test_all_eleven_tools_registered(self, app, sse_rpc, tok):
         tools = sse_rpc(app, "tools/list", token=tok)["result"]["tools"]
         assert {t["name"] for t in tools} == {
             "get_profile", "update_profile", "get_bio", "update_bio",
             "get_memory", "add_memory_trait", "update_focus",
-            "get_data", "list_topics", "update_data"}
+            "get_data", "list_topics", "edit_data", "replace_data"}
 
     def test_instructions_reach_the_client(self, app, sse_rpc, tok):
         res = sse_rpc(app, "initialize", token=tok)
@@ -228,7 +229,7 @@ class TestMemoryFlow:
 
 class TestDataFlow:
     def test_write_then_read_roundtrip(self, app, tok, fake_r2):
-        call(app, "update_data", {"topic": "dsa", "data": '{"done": 5}'}, token=tok)
+        call(app, "replace_data", {"topic": "dsa", "data": '{"done": 5}'}, token=tok)
         payload = call(app, "get_data", {"topic": "dsa"}, token=tok)
         assert json.loads(text_of(payload)) == {"done": 5}
 
@@ -237,12 +238,12 @@ class TestDataFlow:
         assert "error" in json.loads(out)
 
     def test_invalid_json_is_rejected(self, app, tok):
-        out = text_of(call(app, "update_data",
+        out = text_of(call(app, "replace_data",
                            {"topic": "dsa", "data": "{bad"}, token=tok))
         assert "Invalid JSON" in out
 
     def test_traversal_topic_cannot_write_outside(self, app, tok, fake_r2):
-        call(app, "update_data", {"topic": "../../../victim", "data": '{"p":1}'},
+        call(app, "replace_data", {"topic": "../../../victim", "data": '{"p":1}'},
              token=tok)
         assert not any("victim" in p["Key"] for p in fake_r2.puts)
 
@@ -299,7 +300,7 @@ class TestRunPySmoke:
         assert {s.name for s in run.server._tool_schemas} == {
             "get_profile", "update_profile", "get_bio", "update_bio",
             "get_memory", "add_memory_trait", "update_focus",
-            "get_data", "list_topics", "update_data"}
+            "get_data", "list_topics", "edit_data", "replace_data"}
 
     def test_run_module_carries_instructions(self):
         import run

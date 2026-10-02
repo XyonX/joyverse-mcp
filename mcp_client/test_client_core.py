@@ -65,17 +65,17 @@ class TestHandshake:
     def test_initialize_carries_instructions(self, client):
         assert client.initialize().get("instructions")
 
-    def test_lists_ten_tools(self, client):
+    def test_lists_eleven_tools(self, client):
         # Compared against the expected set rather than a bare count, so adding
         # or removing a tool gives a readable diff instead of "10 != 9".
-        assert len(client.list_tools()) == 10
+        assert len(client.list_tools()) == 11
 
     def test_tool_names_match_the_server(self, client):
         names = {t["name"] for t in client.list_tools()}
         assert names == {
             "get_profile", "update_profile", "get_bio", "update_bio",
             "get_memory", "add_memory_trait", "update_focus",
-            "get_data", "list_topics", "update_data"}
+            "get_data", "list_topics", "edit_data", "replace_data"}
 
     def test_bad_token_is_rejected(self, app):
         bad = mc.MCPClient(app, "not-a-jwt")
@@ -129,11 +129,27 @@ class TestToolSchemaConversion:
             props = t["function"]["parameters"].get("properties", {})
             assert "user" not in props
 
-    def test_update_data_schema_expects_a_string(self, client):
+    def test_replace_data_schema_expects_a_string(self, client):
+        # The whole-log writer still takes JSON as a STRING. This is the
+        # mistake an agent most often makes, so the type stays pinned.
         tools = {t["function"]["name"]: t for t in
                  mc.to_openai_tools(client.list_tools())}
-        data_prop = tools["update_data"]["function"]["parameters"]["properties"]["data"]
+        data_prop = tools["replace_data"]["function"]["parameters"]["properties"]["data"]
         assert data_prop["type"] == "string"
+
+    def test_edit_data_schema_exposes_its_operations(self, client):
+        tools = {t["function"]["name"]: t for t in
+                 mc.to_openai_tools(client.list_tools())}
+        props = tools["edit_data"]["function"]["parameters"]["properties"]
+        for arg in ("topic", "op", "value", "path", "match"):
+            assert arg in props, f"edit_data is missing {arg}"
+
+    def test_the_dangerous_tool_is_named_replace_not_update(self, client):
+        # Naming is a safety feature: an agent reading "update_data" would
+        # reasonably assume it sends a patch.
+        names = {t["name"] for t in client.list_tools()}
+        assert "replace_data" in names
+        assert "update_data" not in names
 
 
 class TestToolCallLoop:
