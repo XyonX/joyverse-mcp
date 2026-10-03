@@ -24,6 +24,7 @@ def build_server():
         register_client, list_clients, save_file_from_url, save_file_text,
         get_file, list_files, delete_file)
     from joyverse.uploads import save_file_base64
+    from joyverse.logs import add_to_log, get_log, list_log_days
     from joyverse.prompts import USER_DATA
 
     srv = MCPServer(
@@ -49,6 +50,9 @@ def build_server():
     srv.tool(description="List stored files")(list_files)
     srv.tool(description="Delete a stored file")(delete_file)
     srv.tool(description="Store a file as base64")(save_file_base64)
+    srv.tool(description="Record something that happened")(add_to_log)
+    srv.tool(description="Read back the log")(get_log)
+    srv.tool(description="List days with logs")(list_log_days)
     return srv
 
 
@@ -118,7 +122,7 @@ class TestHandshake:
             "get_data", "list_topics", "edit_data", "replace_data",
             "register_client", "list_clients", "save_file_from_url",
             "save_file_text", "get_file", "list_files", "delete_file",
-            "save_file_base64"}
+            "save_file_base64", "add_to_log", "get_log", "list_log_days"}
 
     def test_instructions_reach_the_client(self, app, sse_rpc, tok):
         res = sse_rpc(app, "initialize", token=tok)
@@ -318,7 +322,7 @@ class TestRunPySmoke:
             "get_data", "list_topics", "edit_data", "replace_data",
             "register_client", "list_clients", "save_file_from_url",
             "save_file_text", "get_file", "list_files", "delete_file",
-            "save_file_base64"}
+            "save_file_base64", "add_to_log", "get_log", "list_log_days"}
 
     def test_run_module_carries_instructions(self):
         import run
@@ -795,3 +799,55 @@ class TestBase64UploadOverMCP:
                                               "arguments": {"path": "a.png",
                                                             "data": "AAAA"}}})
         assert r.status_code == 401
+
+
+class TestLogToolsOverMCP:
+    """add_to_log / get_log over the wire -- the cross-agent memory path."""
+
+    def test_log_then_read_back(self, app, tok):
+        call(app, "add_to_log",
+             {"summary": "Fixed FlexyGrid pricing table overflow",
+              "client": "chatgpt", "tags": ["flexygrid"]}, token=tok)
+        res = call(app, "get_log", {}, token=tok)
+        out = json.loads(text_of(res))
+        assert out["count"] == 1
+        assert "FlexyGrid" in out["entries"][0]["summary"]
+        assert out["has_more"] is False
+
+    def test_list_days_then_fetch(self, app, tok):
+        call(app, "add_to_log", {"summary": "something happened"}, token=tok)
+        res = call(app, "list_log_days", {}, token=tok)
+        days = json.loads(text_of(res))
+        assert days["count"] == 1
+        day = days["days"][0]["date"]
+
+        res = call(app, "get_log", {"date": day}, token=tok)
+        assert json.loads(text_of(res))["total_matched"] == 1
+
+    def test_summary_is_required_over_mcp(self, app, tok):
+        res = call(app, "add_to_log", {"summary": ""}, token=tok)
+        assert '"error"' in text_of(res)
+
+    def test_bad_date_rejected(self, app, tok):
+        res = call(app, "get_log", {"date": "yesterday"}, token=tok)
+        assert '"error"' in text_of(res)
+
+    def test_two_users_logs_are_separate(self, app, tok, make_token):
+        from tests.test_integration import TEST_SECRET
+        call(app, "add_to_log", {"summary": "alice private work"}, token=tok)
+
+        other = make_token("alice", secret=TEST_SECRET)
+        res = call(app, "get_log", {}, token=other)
+        assert json.loads(text_of(res))["entries"] == []
+
+        res = call(app, "list_log_days", {}, token=other)
+        assert json.loads(text_of(res))["days"] == []
+
+    def test_log_tools_require_auth(self, app):
+        for name, args in [("get_log", {}), ("list_log_days", {}),
+                           ("add_to_log", {"summary": "x"})]:
+            r = app.post("/mcp", json={"jsonrpc": "2.0", "id": 1,
+                                       "method": "tools/call",
+                                       "params": {"name": name,
+                                                  "arguments": args}})
+            assert r.status_code == 401, f"{name} reachable unauthenticated"

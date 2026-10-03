@@ -67,8 +67,8 @@ class TestHandshake:
 
     def test_lists_every_tool(self, client):
         # Compared against the expected set rather than a bare count, so adding
-        # or removing a tool gives a readable diff instead of "19 != 18".
-        assert len(client.list_tools()) == 19
+        # or removing a tool gives a readable diff instead of "22 != 21".
+        assert len(client.list_tools()) == 22
 
     def test_tool_names_match_the_server(self, client):
         names = {t["name"] for t in client.list_tools()}
@@ -78,7 +78,7 @@ class TestHandshake:
             "get_data", "list_topics", "edit_data", "replace_data",
             "register_client", "list_clients", "save_file_from_url",
             "save_file_text", "get_file", "list_files", "delete_file",
-            "save_file_base64"}
+            "save_file_base64", "add_to_log", "get_log", "list_log_days"}
 
     def test_bad_token_is_rejected(self, app):
         bad = mc.MCPClient(app, "not-a-jwt")
