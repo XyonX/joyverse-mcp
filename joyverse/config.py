@@ -209,8 +209,18 @@ def _env_int(name: str, default: int) -> int:
 MB = 1024 * 1024
 GB = 1024 * MB
 
-MAX_FILE_BYTES = _env_int("JOYVERSE_MAX_FILE_MB", 500) * MB
+# Per-file ceiling. Nothing can currently reach this: the only upload paths are
+# save_file_from_url and save_file_base64, which is capped by MAX_INLINE_BYTES.
+# It is left generous because the binding constraint is the per-user quota
+# below, not any single object.
+MAX_FILE_BYTES = _env_int("JOYVERSE_MAX_FILE_MB", 2048) * MB
 MAX_USER_BYTES = _env_int("JOYVERSE_MAX_USER_GB", 50) * GB
+
+# Largest file save_file_base64 will accept in one call. Base64 inflates by a
+# third and the payload is charged to the agent's context window, so this stays
+# small on purpose. Larger files need a transport that does not route bytes
+# through the model, which does not exist yet.
+MAX_INLINE_BYTES = _env_int("JOYVERSE_MAX_INLINE_MB", 8) * MB
 
 # Guards for server-side URL fetches.
 FETCH_TIMEOUT_SECONDS = _env_int("JOYVERSE_FETCH_TIMEOUT", 30)

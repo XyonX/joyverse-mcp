@@ -13,6 +13,7 @@ from joyverse.storage import (
     register_client, list_clients, save_file_from_url, save_file_text,
     get_file, list_files, delete_file,
 )
+from joyverse.uploads import save_file_base64
 from joyverse.prompts import USER_DATA
 from joyverse import auth as jv_auth
 
@@ -159,6 +160,15 @@ server.tool(description=(
     "-- without going through a URL. Use save_file_from_url instead when the "
     "content already exists somewhere fetchable."),
     scopes=[WRITE_SCOPE])(save_file_text)
+
+server.tool(description=(
+    "Store a file you already hold -- an image or document attached to this "
+    "conversation, or something you generated -- by sending its bytes as "
+    "base64. This is the way to store a file that has no public URL: "
+    "save_file_from_url needs one, and save_file_text only handles plain text. "
+    "Keep it small (a few MB); the bytes are charged to your context window, so "
+    "for anything large host it publicly and use save_file_from_url."),
+    scopes=[WRITE_SCOPE])(save_file_base64)
 
 server.tool(description=(
     "Get a temporary download link for a file you stored earlier. The link is "
