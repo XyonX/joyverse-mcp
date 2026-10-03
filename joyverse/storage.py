@@ -131,18 +131,30 @@ def register_client(name: str, platform: Optional[str] = None,
             "error": "Client name already registered",
             "name": clean,
             "client_id": existing["client_id"],
-            "hint": "Choose a different name, or reuse this one via "
-                    "list_files.",
+            # This hint used to say "choose a different name", which
+            # instructed the agent to do exactly the wrong thing: every
+            # collision then produced another client and split the user's
+            # files across folders. The fix is to reuse, never to rename.
+            "hint": f"You already have a client called '{clean}'. Reuse it as "
+                    f"client=\"{clean}\" -- do not register a new name. Call "
+                    "list_clients to see all of your clients, and pick the one "
+                    "matching the product you are.",
         })
 
     # Opaque, derived from the name but not reversible into anything usable.
     client_id = "c_" + hashlib.sha256(
         f"{user_id}:{clean}".encode()).hexdigest()[:12]
 
+    # platform was stored verbatim, so the same product accumulated spellings
+    # like "chatgpt", "ChatGPT" and "claude.ai". It is descriptive only and
+    # never an identity, so folding it costs nothing.
+    clean_platform = platform.strip().lower() if isinstance(platform, str) \
+        and platform.strip() else None
+
     registry["clients"][clean] = {
         "client_id": client_id,
         "name": clean,
-        "platform": platform,
+        "platform": clean_platform,
         "first_seen": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
     _save_clients(user_id, registry)
@@ -151,7 +163,7 @@ def register_client(name: str, platform: Optional[str] = None,
         "ok": True,
         "client_id": client_id,
         "name": clean,
-        "platform": platform,
+        "platform": clean_platform,
         "storage_path": client_prefix(user_id, clean),
     })
 

@@ -137,10 +137,12 @@ server.tool(description=(
 # ==========================================
 
 server.tool(description=(
-    "Claim a client name so it can save and fetch files. Call this once per "
-    "agent before any file tool; the name becomes your storage folder and is "
-    "yours alone -- another user may hold the same name with no overlap. "
-    "Pick a stable name you will keep using."),
+    "Claim a client name so you can save and fetch files. Call list_clients "
+    "FIRST: if your name is already registered, reuse it instead of "
+    "registering again -- a second name splits your files across folders. Use "
+    "the plain product name (chatgpt, claude, hermes) and keep it stable "
+    "across sessions. You only need this to WRITE files; reading another "
+    "client's file just needs its name."),
     scopes=[WRITE_SCOPE])(register_client)
 
 server.tool(description=(

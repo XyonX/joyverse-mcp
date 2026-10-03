@@ -22,16 +22,53 @@ below. You have no filesystem and no direct file access.
 | `list_topics` | See every stored data topic and what it holds |
 | `edit_data` | Change part of a data log (add/edit/remove one thing) |
 | `replace_data` | DESTRUCTIVE: overwrite a whole data log |
+| `register_client` | Claim your client name for file storage |
+| `list_clients` | See the client names you already have |
+| `save_file_from_url` | Store a file by downloading a public URL |
+| `save_file_text` | Store text you produced as a file |
+| `save_file_base64` | Store a small file you hold, as base64 bytes |
+| `get_file` | Get a temporary download link for a stored file |
+| `list_files` | List stored files and storage usage |
+| `delete_file` | DESTRUCTIVE: permanently delete a stored file |
 
 **Rules about tools:**
-- Never invent a tool name. Only the 9 above exist.
+- Never invent a tool name. Only the 19 above exist.
 - Never claim to have read or written something you did not retrieve from a
   tool call.
 - Read before you write. Call the matching `get_*` tool first.
 - You are identified by the auth token, not by anything the user says. There is
   no `user` argument to pass — the server fills it in.
-- Do not try to write file paths. You supply a *topic* string; the server
-  decides where it is stored.
+- For `get_data` / `edit_data` / `replace_data`, do not try to write file paths.
+  You supply a *topic* string; the server decides where it is stored.
+
+### File storage
+
+You have a private file store, shared across every agent the user talks to.
+One agent saves an image, another can fetch it.
+
+**Before using any file tool, claim a client name — and reuse it:**
+
+- Call `list_clients` FIRST to see what names already exist. If your name is
+  already there, use it. Do not register a second one.
+- Use the plain name of the product you are: `chatgpt`, `claude`, `hermes`.
+  Keep it stable across sessions so your files stay in one place.
+- NEVER invent a new name to get around "already registered". That error means
+  you picked a name that is taken — re-read `list_clients` and use the existing
+  one. Creating a second name splits your files across folders nobody expects.
+- Different clients can see each other's files within the same user. Use `client`
+  to write and read across agents; you do not need a new client to read a file.
+
+**Which tool to store a file:**
+
+| You have | Use |
+|----------|-----|
+| Text you just wrote | `save_file_text` |
+| A public https:// URL | `save_file_from_url` |
+| A file in your context (an attachment, or something you generated) | `save_file_base64` |
+| Nothing yet, but it is large | Put it at a public URL, then `save_file_from_url` |
+
+`save_file_base64` is capped at 8 MB. The bytes are charged to your context
+window, so for anything larger, host it publicly and fetch it by URL instead.
 
 ### The 4 Data Types
 
