@@ -1,4 +1,6 @@
 import inspect
+import types
+import typing
 from typing import get_type_hints, Dict, Any, List
 from mcppro.types import MCPToolDefinition
 
@@ -11,6 +13,29 @@ TYPE_MAP = {
     list: "array",
     dict: "object",
 }
+
+def _unwrap_optional(python_type):
+    """Reduce Optional[X] / X | None to X.
+
+    `Optional[list]` is a Union, not a `list`, so a direct lookup in TYPE_MAP
+    missed and fell through to the "string" default. That published three
+    list parameters as strings -- add_to_log.tags, add_to_log.files and
+    get_log.tags -- and the agents rejected the calls rather than guessing.
+
+    A parameter that is Optional is not required, so `required` is already
+    driven by the default value; unwrapping only affects the advertised type.
+    """
+    origin = typing.get_origin(python_type)
+    if origin is typing.Union or origin is getattr(types, "UnionType", ()):
+        args = [a for a in typing.get_args(python_type)
+                if a is not type(None)]
+        if len(args) == 1:
+            return args[0]
+        # A real multi-type union (str | int) has no honest JSON Schema single
+        # type; string is the safe thing to advertise.
+        return str
+    return python_type
+
 
 def infer_input_schema(func) -> Dict[str, Any]:
     """
@@ -31,8 +56,8 @@ def infer_input_schema(func) -> Dict[str, Any]:
         if param_name in ("self", "cls", "user"):
             continue
 
-        # Get JSON type from Python type hint
-        python_type = hints.get(param_name, str)
+        # Get JSON type from Python type hint, seeing through Optional.
+        python_type = _unwrap_optional(hints.get(param_name, str))
         json_type = TYPE_MAP.get(python_type, "string")
 
         properties[param_name] = {"type": json_type}
