@@ -1,6 +1,9 @@
 """Unit tests for mcppro/decorators.py -- schema inference and registration."""
+import typing
+
 import pytest
-from mcppro.decorators import infer_input_schema, create_tool_decorator
+from mcppro.decorators import (
+    infer_input_schema, create_tool_decorator, TYPE_MAP)
 
 
 class FakeServer:
@@ -176,3 +179,120 @@ class TestRegistration:
             ...
 
         assert b._tool_schemas == []
+
+
+class TestOptionalResolution:
+    """Optional[X] must advertise X's type.
+
+    The original suite enumerated the six types in TYPE_MAP and stopped, so
+    every type NOT in the map was assumed to be a string. `Optional[list]` is a
+    Union, missed the lookup, and published three real tool params as strings
+    (add_to_log.tags, add_to_log.files, get_log.tags) -- caught by an agent,
+    not by these tests.
+    """
+
+    @pytest.mark.parametrize("hint,json_type", [
+        (typing.Optional[list], "array"),
+        (typing.Optional[str], "string"),
+        (typing.Optional[int], "integer"),
+        (typing.Optional[float], "number"),
+        (typing.Optional[bool], "boolean"),
+        (typing.Optional[dict], "object"),
+    ])
+    def test_optional_maps_to_inner_type(self, hint, json_type):
+        def fn(a: hint):
+            ...
+        assert infer_input_schema(fn)["properties"]["a"]["type"] == json_type
+
+    def test_pep604_union_syntax(self):
+        def fn(a: list | None):
+            ...
+        assert infer_input_schema(fn)["properties"]["a"]["type"] == "array"
+
+    def test_mixed_union_degrades_to_string(self):
+        """str | int has no single honest JSON type; string is safe."""
+        def fn(a: typing.Union[str, int]):
+            ...
+        assert infer_input_schema(fn)["properties"]["a"]["type"] == "string"
+
+    def test_optional_without_default_is_still_required(self):
+        def fn(a: typing.Optional[str]):
+            ...
+        assert infer_input_schema(fn)["required"] == ["a"]
+
+    def test_optional_with_none_default_is_not_required(self):
+        def fn(a: typing.Optional[list] = None):
+            ...
+        assert infer_input_schema(fn)["required"] == []
+
+
+class TestEveryToolSchemaMatchesItsSignature:
+    """Reflection guard over the real registered tools.
+
+    The unit tests above prove the resolver works in isolation; this proves no
+    registered tool ships a schema that disagrees with its own signature. It is
+    the check that would have caught the Optional[list] bug at the moment the
+    tools were written, rather than when an agent called them.
+    """
+
+    @pytest.fixture(scope="class")
+    def schemas(self):
+        import run
+        return {s.name: s for s in run.server._tool_schemas}
+
+    def test_no_list_param_is_published_as_a_string(self, schemas):
+        """The specific regression: a list-typed param advertised as a string.
+
+        Checked by reflecting on the function rather than hard-coding names, so
+        a new Optional[list] param fails here on the day it is added.
+        """
+        import inspect
+        import typing
+
+        import run
+        from mcppro.decorators import _unwrap_optional
+
+        bad = []
+        for name, schema in schemas.items():
+            func = run.server._tool_functions[name]
+            hints = typing.get_type_hints(func)
+            for param in schema.inputSchema.get("properties", {}):
+                hint = _unwrap_optional(hints.get(param))
+                origin = typing.get_origin(hint) or hint
+                if origin in (list, dict):
+                    published = schema.inputSchema["properties"][param]["type"]
+                    if published != TYPE_MAP[origin]:
+                        bad.append(f"{name}.{param} published {published}, "
+                                   f"signature says {origin}")
+        assert not bad, bad
+
+    @pytest.mark.parametrize("tool_name,param_name,json_type", [
+        ("add_to_log", "tags", "array"),
+        ("add_to_log", "files", "array"),
+        ("get_log", "tags", "array"),
+    ])
+    def test_list_params_are_published_as_arrays(
+            self, schemas, tool_name, param_name, json_type):
+        """The three that shipped wrong. Named so a regression is obvious."""
+        spec = schemas[tool_name].inputSchema["properties"][param_name]
+        assert spec["type"] == json_type, (
+            f"{tool_name}.{param_name} published as {spec['type']}; agents read "
+            "this and reject the call")
+
+    def test_schema_matches_live_signature_for_every_tool(self, schemas):
+        """Compare the published schema against the function's own hints."""
+        import run
+        from mcppro.decorators import infer_input_schema
+
+        mismatches = []
+        for name, schema in schemas.items():
+            func = run.server._tool_functions[name]
+            inferred = infer_input_schema(func)
+            published = schema.inputSchema.get("properties", {})
+            for param, spec in published.items():
+                want = inferred["properties"].get(param, {}).get("type")
+                if want and spec.get("type") != want:
+                    mismatches.append(
+                        f"{name}.{param}: published {spec.get('type')}, "
+                        f"signature says {want}")
+        assert not mismatches, mismatches
