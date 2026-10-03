@@ -14,6 +14,7 @@ from joyverse.storage import (
     get_file, list_files, delete_file,
 )
 from joyverse.uploads import save_file_base64
+from joyverse.logs import add_to_log, get_log, list_log_days
 from joyverse.prompts import USER_DATA
 from joyverse import auth as jv_auth
 
@@ -171,6 +172,29 @@ server.tool(description=(
     "Keep it small (a few MB); the bytes are charged to your context window, so "
     "for anything large host it publicly and use save_file_from_url."),
     scopes=[WRITE_SCOPE])(save_file_base64)
+
+server.tool(description=(
+    "Record one thing that happened, so a later conversation can recall it. "
+    "Call this before you finish a conversation that did real work -- the "
+    "summary is the only part anyone reads back, so make it specific: say what "
+    "was done AND what it was about. 'Fixed FlexyGrid pricing table overflow' "
+    "is useful; 'worked on frontend' is not. Add tags so it can be found later, "
+    "and include any files you stored."),
+    scopes=[WRITE_SCOPE])(add_to_log)
+
+server.tool(description=(
+    "Read back what was logged. With no arguments, returns the last 24 hours -- "
+    "use that for 'what have we been doing'. Pass date for one whole day, or "
+    "since/until for a range such as 12pm-2pm; both accept a bare date "
+    "(2026-10-01) or a full timestamp. Check has_more: if it is true you are "
+    "seeing a truncated view, so widen the window or raise limit."),
+    scopes=[READ_SCOPE])(get_log)
+
+server.tool(description=(
+    "See which days have a log recorded, newest first. Call this FIRST when you "
+    "do not know whether something was logged -- it avoids guessing a date. "
+    "Pass include_counts=true to also get how many entries each day holds."),
+    scopes=[READ_SCOPE])(list_log_days)
 
 server.tool(description=(
     "Get a temporary download link for a file you stored earlier. The link is "

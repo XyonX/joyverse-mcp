@@ -1,4 +1,6 @@
 import os
+import re
+
 from dotenv import load_dotenv
 import boto3
 from botocore.config import Config
@@ -225,3 +227,20 @@ MAX_INLINE_BYTES = _env_int("JOYVERSE_MAX_INLINE_MB", 8) * MB
 # Guards for server-side URL fetches.
 FETCH_TIMEOUT_SECONDS = _env_int("JOYVERSE_FETCH_TIMEOUT", 30)
 MAX_REDIRECTS = 5
+
+# Conversation logs are stored one object per day, named by date. Validated
+# here because the date is user-supplied and becomes a key segment.
+DATE_PATTERN = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def get_log_key(user_id: str, date: str) -> str:
+    """R2 key for one day's conversation log.
+
+    One object per day, rather than a single growing log, so that asking about
+    a date reads one small object instead of scanning all history. The date is
+    validated strictly before it becomes a path segment -- an unvalidated date
+    is user input and this is a key.
+    """
+    if not DATE_PATTERN.match(date or ""):
+        raise ValueError(f"Invalid date: {date!r}. Use YYYY-MM-DD.")
+    return f"users/{_safe_user_id(user_id)}/logs/{date}.jsonl"
