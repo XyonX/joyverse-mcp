@@ -201,7 +201,7 @@ def fake_r2(monkeypatch, no_network_guard):
     # identity was added later; it imports r2_client too and must be patched
     # or the registry would be read from and written to the real bucket.
     modules = ["config", "profile", "bio", "memory", "data", "identity",
-               "storage"]
+               "storage", "uploads"]
     for name in modules:
         mod = __import__(f"joyverse.{name}", fromlist=["r2_client"])
         monkeypatch.setattr(mod, "r2_client", fake, raising=False)

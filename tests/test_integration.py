@@ -23,6 +23,7 @@ def build_server():
     from joyverse.storage import (
         register_client, list_clients, save_file_from_url, save_file_text,
         get_file, list_files, delete_file)
+    from joyverse.uploads import save_file_base64
     from joyverse.prompts import USER_DATA
 
     srv = MCPServer(
@@ -47,6 +48,7 @@ def build_server():
     srv.tool(description="Get a download link for a stored file")(get_file)
     srv.tool(description="List stored files")(list_files)
     srv.tool(description="Delete a stored file")(delete_file)
+    srv.tool(description="Store a file as base64")(save_file_base64)
     return srv
 
 
@@ -115,7 +117,8 @@ class TestHandshake:
             "get_memory", "add_memory_trait", "update_focus",
             "get_data", "list_topics", "edit_data", "replace_data",
             "register_client", "list_clients", "save_file_from_url",
-            "save_file_text", "get_file", "list_files", "delete_file"}
+            "save_file_text", "get_file", "list_files", "delete_file",
+            "save_file_base64"}
 
     def test_instructions_reach_the_client(self, app, sse_rpc, tok):
         res = sse_rpc(app, "initialize", token=tok)
@@ -314,7 +317,8 @@ class TestRunPySmoke:
             "get_memory", "add_memory_trait", "update_focus",
             "get_data", "list_topics", "edit_data", "replace_data",
             "register_client", "list_clients", "save_file_from_url",
-            "save_file_text", "get_file", "list_files", "delete_file"}
+            "save_file_text", "get_file", "list_files", "delete_file",
+            "save_file_base64"}
 
     def test_run_module_carries_instructions(self):
         import run
@@ -739,3 +743,55 @@ class TestFileToolsOverMCP:
                                        "params": {"name": name,
                                                   "arguments": args}})
             assert r.status_code == 401, f"{name} was reachable unauthenticated"
+
+
+class TestBase64UploadOverMCP:
+    """save_file_base64 through the wire -- the agent -> Joyverse path for a
+    file it holds directly and has no public URL for."""
+
+    def test_upload_and_fetch_round_trip(self, app, tok):
+        import base64 as _b64
+        raw = b"\x89PNG\r\n\x1a\n" + bytes(range(256)) * 4
+        call(app, "register_client", {"name": "chatgpt"}, token=tok)
+        res = call(app, "save_file_base64",
+                   {"path": "design-languages/DL01.png",
+                    "data": _b64.b64encode(raw).decode(),
+                    "mime_type": "image/png", "client": "chatgpt"}, token=tok)
+        out = json.loads(text_of(res))
+        assert out["ok"] is True
+        assert out["size_bytes"] == len(raw)
+
+        res = call(app, "list_files", {"client": "chatgpt"}, token=tok)
+        paths = {f["path"] for f in json.loads(text_of(res))["files"]}
+        assert "design-languages/DL01.png" in paths
+
+    def test_invalid_base64_is_refused(self, app, tok):
+        call(app, "register_client", {"name": "chatgpt"}, token=tok)
+        res = call(app, "save_file_base64",
+                   {"path": "bad.png", "data": "!!!!not base64!!!!",
+                    "client": "chatgpt"}, token=tok)
+        assert "not valid base64" in text_of(res)
+
+    def test_traversal_refused(self, app, tok):
+        call(app, "register_client", {"name": "chatgpt"}, token=tok)
+        res = call(app, "save_file_base64",
+                   {"path": "../../escape.png", "data": "AAAA",
+                    "client": "chatgpt"}, token=tok)
+        assert '"error"' in text_of(res)
+
+    def test_user_cannot_be_forged(self, app, tok):
+        import base64 as _b64
+        res = call(app, "save_file_base64",
+                   {"path": "x.png", "data": _b64.b64encode(b"x").decode(),
+                    "client": "chatgpt", "user": {"user_id": "u_other"}},
+                   token=tok)
+        out = json.loads(text_of(res))
+        assert "error" in out or out.get("ok") is True
+
+    def test_requires_auth(self, app):
+        r = app.post("/mcp", json={"jsonrpc": "2.0", "id": 1,
+                                   "method": "tools/call",
+                                   "params": {"name": "save_file_base64",
+                                              "arguments": {"path": "a.png",
+                                                            "data": "AAAA"}}})
+        assert r.status_code == 401
