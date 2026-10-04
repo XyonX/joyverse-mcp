@@ -12,6 +12,15 @@ TYPE_MAP = {
     bool: "boolean",
     list: "array",
     dict: "object",
+    # Any means "whatever the caller sends". JSON Schema has no single type for
+    # that, so an empty schema (meaning "no constraint") is the honest answer.
+    # Publishing "string" here is what told agents to send a JSON string where
+    # an object was meant, silently corrupting stored topics.
+    Any: "",
+    # Parametrised aliases like Dict[str, Any] and List[str] are not `dict` or
+    # `list` themselves, so they needed their origin type looked up.
+    typing.Dict: "object",
+    typing.List: "array",
 }
 
 def _unwrap_optional(python_type):
@@ -26,11 +35,17 @@ def _unwrap_optional(python_type):
     driven by the default value; unwrapping only affects the advertised type.
     """
     origin = typing.get_origin(python_type)
+    if origin is not None and origin not in (typing.Union,
+                                             getattr(types, "UnionType", None)):
+        # A parametrised alias: Dict[str, Any] -> dict, List[str] -> list.
+        return origin
     if origin is typing.Union or origin is getattr(types, "UnionType", ()):
         args = [a for a in typing.get_args(python_type)
                 if a is not type(None)]
         if len(args) == 1:
-            return args[0]
+            # Recurse: the inner type may itself be a parametrised alias,
+            # e.g. Optional[Dict[str, Any]] -> Dict[str, Any] -> dict.
+            return _unwrap_optional(args[0])
         # A real multi-type union (str | int) has no honest JSON Schema single
         # type; string is the safe thing to advertise.
         return str
@@ -60,7 +75,9 @@ def infer_input_schema(func) -> Dict[str, Any]:
         python_type = _unwrap_optional(hints.get(param_name, str))
         json_type = TYPE_MAP.get(python_type, "string")
 
-        properties[param_name] = {"type": json_type}
+        # An empty JSON type means "accepts anything" -- publish an empty
+        # schema rather than an empty string, which is not a valid type.
+        properties[param_name] = ({"type": json_type} if json_type else {})
 
         # If parameter has no default value, it's required
         if param.default is inspect.Parameter.empty:
