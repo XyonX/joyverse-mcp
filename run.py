@@ -15,7 +15,7 @@ from joyverse.storage import (
 )
 from joyverse.uploads import save_file_base64
 from joyverse.logs import add_to_log, get_log, list_log_days
-from joyverse.prompts import USER_DATA
+from joyverse.prompts import build_instructions
 from joyverse import auth as jv_auth
 
 
@@ -72,7 +72,6 @@ server = MCPServer(
     name="joyverse-mcp",
     version="1.0.0",
     auth=build_auth(),                    # OAuth first, then bearer
-    instructions=USER_DATA,
     extra_routes=build_discovery_routes(),
     resource_url=_RESOURCE_URL,
 )
@@ -322,6 +321,13 @@ def _live_data_topics(user: dict) -> list:
 
 
 server.resources.set_lister(_live_data_topics)
+
+
+# Assigned here rather than in the constructor: build_instructions reads the
+# tool registry, and the registry is only complete once every tool() call
+# above has run. A tool registered without appearing in the instructions is
+# the exact drift this ordering prevents.
+server.instructions = build_instructions(server)
 
 
 if __name__ == "__main__":

@@ -12,7 +12,6 @@ import re
 import pytest
 
 from joyverse import storage
-from joyverse.prompts import USER_DATA
 
 ALICE = {"user_id": "u_alice"}
 
@@ -66,41 +65,56 @@ class TestInstructionsAreAccurate:
         import run
         return {s.name for s in run.server._tool_schemas}
 
-    def test_every_registered_tool_is_documented(self, registered):
-        missing = sorted(n for n in registered
-                         if f"`{n}`" not in USER_DATA)
+    @pytest.fixture(scope="class")
+    def instructions(self):
+        """The block the server actually sends, not a static constant."""
+        import run
+        return run.server.instructions
+
+    def test_every_registered_tool_is_documented(self, registered, instructions):
+        missing = sorted(n for n in registered if f"`{n}`" not in instructions)
         assert not missing, f"undocumented tools: {missing}"
 
-    def test_tool_count_in_instructions_is_correct(self, registered):
-        """It claimed 9 tools while 19 were registered."""
-        claimed = re.findall(r"Only the (\d+) above exist", USER_DATA)
+    def test_tool_count_in_instructions_is_correct(self, registered, instructions):
+        """It claimed 9 tools while 19 were registered.
+
+        Now structurally impossible: the list is generated from the registry,
+        so this test only guards the count line itself staying correct.
+        """
+        claimed = re.findall(r"Only these (\d+) tools exist", instructions)
         assert claimed, "the tool-count rule disappeared"
         assert int(claimed[0]) == len(registered), (
             f"instructions say {claimed[0]} tools, server has "
             f"{len(registered)}")
 
-    def test_instructions_warn_against_inventing_clients(self):
-        low = USER_DATA.lower()
-        assert "do not register a second one" in low
-        assert "never invent a new name" in low
+    def test_instructions_warn_against_inventing_clients(self, instructions):
+        low = instructions.lower()
+        assert "second name splits your files" in low
+        assert "never invent another name" in low
         assert "list_clients" in low
 
-    def test_instructions_give_the_naming_convention(self):
+    def test_instructions_give_the_naming_convention(self, instructions):
         for expected in ("chatgpt", "claude", "hermes"):
-            assert expected in USER_DATA
+            assert expected in instructions
 
-    def test_instructions_point_at_the_right_ingest_tool(self):
-        low = USER_DATA.lower()
+    def test_instructions_point_at_the_right_ingest_tool(self, instructions):
+        low = instructions.lower()
         assert "save_file_base64" in low
         assert "save_file_from_url" in low
         assert "8 mb" in low
 
-    def test_stale_no_file_paths_rule_is_scoped_to_data_tools(self):
-        """It used to say 'do not write file paths', which file tools require."""
-        idx = USER_DATA.find("do not try to write file paths")
-        assert idx != -1
-        # The scoping clause sits just ABOVE the sentence, so search backwards.
-        # Unscoped, this reads as a ban on paths and contradicts the file tools.
-        before = USER_DATA[max(0, idx - 160):idx]
-        for tool in ("get_data", "edit_data", "replace_data"):
-            assert tool in before, f"{tool} not named as the scope"
+    def test_no_unscoped_ban_on_paths(self, instructions):
+        """It used to say 'do not write file paths' unscoped, which read as a
+        ban on paths and contradicted the file tools that REQUIRE a path.
+
+        The rewritten block drops the sentence entirely and states the
+        positive rule instead, so this guards against the ambiguity returning
+        rather than pinning one particular phrasing of the fix.
+        """
+        low = instructions.lower()
+        assert "do not try to write file paths" not in low
+        # The positive form must still be there: you name a topic, the server
+        # picks the path.
+        assert "server decides where it lives" in low
+        # And the file tools must still be told to use a path.
+        assert "take a `path`" in low
