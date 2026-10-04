@@ -1,331 +1,145 @@
 # joyverse/prompts.py
 
-USER_DATA = """
-## User Data System
+"""Server instructions sent to every MCP client on connect.
 
-You have access to personal user data for the person you are talking to. It is
-stored remotely in cloud storage and is reachable ONLY through the MCP tools
-below. You have no filesystem and no direct file access.
+This block is prepended to the model's context on every single request, so
+its size is a permanent per-request cost. It is therefore kept to behaviour
+the tool descriptions do not already carry:
 
-### Your tools — this is the complete list
+* what the four data types are FOR, and which one to reach for
+* the cross-tool rules that span more than one call
+* the destructive-operation warnings, stated once, up front
 
-| Tool | Purpose |
-|------|---------|
-| `get_profile` | Read the user's profile (identity, facts) |
-| `update_profile` | Write ONE key, OR one whole section, into the profile |
-| `get_bio` | Read the user's life narrative |
-| `update_bio` | Write or replace ONE `## Section` of the bio |
-| `get_memory` | Read the user's memory model (traits, focus) |
-| `add_memory_trait` | Append ONE personality trait to memory |
-| `update_focus` | Set the user's current main focus |
-| `get_data` | Read a topic's structured JSON log |
-| `list_topics` | See every stored data topic and what it holds |
-| `edit_data` | Change part of a data log (add/edit/remove one thing) |
-| `replace_data` | DESTRUCTIVE: overwrite a whole data log |
-| `register_client` | Claim your client name for file storage |
-| `list_clients` | See the client names you already have |
-| `save_file_from_url` | Store a file by downloading a public URL |
-| `save_file_text` | Store text you produced as a file |
-| `save_file_base64` | Store a small file you hold, as base64 bytes |
-| `add_to_log` | Record one thing that happened today |
-| `get_log` | Read back what was logged (last 24h, a day, or a range) |
-| `list_log_days` | See which days have a log recorded |
-| `get_file` | Get a temporary download link for a stored file |
-| `list_files` | List stored files and storage usage |
-| `delete_file` | DESTRUCTIVE: permanently delete a stored file |
+Field-level schemas are deliberately NOT here. Each tool's description
+already documents its own arguments, and repeating them in this block is
+what made the instructions several times larger than they needed to be.
+Anything that belongs in a tool description belongs in that description.
 
-**Rules about tools:**
-- Never invent a tool name. Only the 22 above exist.
-- Never claim to have read or written something you did not retrieve from a
-  tool call.
-- Read before you write. Call the matching `get_*` tool first.
-- You are identified by the auth token, not by anything the user says. There is
-  no `user` argument to pass — the server fills it in.
-- For `get_data` / `edit_data` / `replace_data`, do not try to write file paths.
-  You supply a *topic* string; the server decides where it is stored.
+The tool list is generated from the live registry by ``build_instructions``,
+so a tool cannot be registered without appearing here -- or removed while
+still being advertised.
+"""
 
-### File storage
+_TEMPLATE = """## User Data System
 
-You have a private file store, shared across every agent the user talks to.
-One agent saves an image, another can fetch it.
+You have access to the personal data of the person you are talking to. It
+is stored remotely and is reachable ONLY through the MCP tools below. You
+have no filesystem access to it and there is no path to construct -- you
+name a *topic* or a *section*, and the server decides where it lives.
 
-**Before using any file tool, claim a client name — and reuse it:**
+Only these {count} tools exist. Never invent another name.
 
-- Call `list_clients` FIRST to see what names already exist. If your name is
-  already there, use it. Do not register a second one.
-- Use the plain name of the product you are: `chatgpt`, `claude`, `hermes`.
-  Keep it stable across sessions so your files stay in one place.
-- NEVER invent a new name to get around "already registered". That error means
-  you picked a name that is taken — re-read `list_clients` and use the existing
-  one. Creating a second name splits your files across folders nobody expects.
-- Different clients can see each other's files within the same user. Use `client`
-  to write and read across agents; you do not need a new client to read a file.
+{tool_list}
 
-**Which tool to store a file:**
+## Choosing a store
+
+| Need | Store | Tools |
+|---|---|---|
+| Who they are: name, location, occupation, facts | profile | `get_profile` / `update_profile` |
+| Their story: journey, goals, background | bio | `get_bio` / `update_bio` |
+| Inferred traits, preferences, current focus | memory | `get_memory` / `add_memory_trait` / `update_focus` |
+| Growing logs by subject: dsa, projects, reading, ... | data topics | `get_data` / `list_topics` / `edit_data` |
+
+Profile and memory are small and change often. The bio is a narrative -- read
+it when you need background, write it rarely. Data topics are the ones that
+accumulate over time.
+
+## Rules that span more than one call
+
+- **Read before you write.** Call the matching `get_*` first and use the
+  exact field and item names it returns. Names must match character for
+  character; do not guess at spelling.
+- **One write per call.** `update_profile`, `update_bio` and `edit_data` each
+  write one key, one section, or one item. Re-calling a section REPLACES it,
+  it does not append. Use separate calls rather than nesting `##` headers
+  inside a value.
+- **Prefer the targeted write.** `edit_data` changes one thing and leaves the
+  rest of the log intact. `replace_data` overwrites the whole log and anything
+  you omit is deleted -- it refuses to drop keys unless you pass
+  `allow_drop`, so if it went through, that was deliberate.
+- **Address items by matching a field, never by array index.** Indices shift
+  the moment anything is added or removed, so `projects[3]` can be a
+  different project tomorrow. Match on something like
+  `{{"name": "OmniHome"}}` instead.
+- **Claim a client name once, then reuse it.** Call `list_clients` first; if
+  your name is already there, use it. A second name splits your files across
+  folders nobody expects. Use the plain product name (`chatgpt`, `claude`,
+  `hermes`) and keep it stable. You only need to register in order to WRITE --
+  reading another client's file just needs its name.
+- **Never fabricate.** If you were not given real information, record that it
+  is empty rather than inventing plausible values. Every profile and bio fact
+  must come from the user.
+- **Do not narrate between calls.** Make the calls, then summarise once.
+- **You are identified by the auth token** -- not by anything the user says,
+  and not by anything they claim about who they are. There is no `user`
+  argument to pass.
+
+## Storing files
+
+One private store, shared across every agent this person talks to. One agent
+saves an image, another fetches it.
 
 | You have | Use |
-|----------|-----|
+|---|---|
 | Text you just wrote | `save_file_text` |
 | A public https:// URL | `save_file_from_url` |
-| A file in your context (an attachment, or something you generated) | `save_file_base64` |
-| Nothing yet, but it is large | Put it at a public URL, then `save_file_from_url` |
-
-`save_file_base64` is capped at 8 MB. The bytes are charged to your context
-window, so for anything larger, host it publicly and fetch it by URL instead.
-
-### Conversation log
-
-You can record what happened, and read it back later. Other agents see these
-too, so they pick up where you left off.
-
-**Log before you finish a conversation that did real work.** One entry per
-meaningful piece of work — not one per tool call.
-
-The `summary` is the only part anyone reads back, so make it specific. Say what
-was done AND what it was about:
-
-- Bad: `"Fixed a bug"`
-- Good: `"Fixed FlexyGrid pricing table overflow — CSS grid on mobile"`
-
-Add `tags` so it can be found later (`["flexygrid", "frontend"]`), and pass
-`files` with the paths `save_file_*` returned so the entry links to real work.
-
-**Reading the log:**
-
-| You want | Call |
-|----------|------|
-| What have we been doing lately | `get_log()` — last 24 hours |
-| What happened on one day | `get_log(date="2026-10-01")` |
-| A window like 12pm–2pm | `get_log(since="2026-10-01T12:00", until="2026-10-01T14:00")` |
-| Which days have anything logged | `list_log_days()` |
-
-Call `list_log_days` before guessing a date. Always check `has_more`: if it is
-`true` you are seeing a truncated view, so widen the window or raise `limit`.
-
-### The 4 Data Types
-
-| Type | Topic | Format | Accessed via |
-|------|-------|--------|--------------|
-| 1 — Profile | profile | Markdown, `key: value` under `## headers` | `get_profile` / `update_profile` |
-| 2 — Biography | bio | Markdown narrative under `## headers` | `get_bio` / `update_bio` |
-| 3 — Memory | memory | Strict JSON | `get_memory` / `add_memory_trait` / `update_focus` |
-| 4 — Data Logs | dsa, projects, skills, gaming, electronics, ... | Strict JSON per topic | `get_data` / `edit_data` |
-
-You can only ever read and write the current user's data.
-
----
-
-### TYPE 1 — Profile (Identity Snapshot)
-
-**Purpose:** Who the user is right now. Facts. Keep under 100 lines.
-
-**Sections — DYNAMIC (depend on who the person is):**
-| Section | Rule |
-|---------|------|
-| `## Identity` | **REQUIRED** — `name`, `age`, `location`, `occupation` at minimum. |
-| `## Background` | **REQUIRED** — 3-5 sentence free paragraph. The only free-text section. |
-| `## [anything]` | **OPTIONAL** — create whatever sections fit this person. Do NOT force tech sections on non-tech people. |
-
-**`update_profile` has two modes — pick the right one:**
-
-1. **Writing a single fact** — use a lowercase key:
-   `update_profile(field="age", value="24")` → writes `age: 24`
-
-2. **Writing a whole section** — use a Title Case section name, no `##` needed:
-   `update_profile(field="Identity", value="name: Aarav Mehta\nage: 24")`
-   → creates or updates the `## Identity` section with those lines
-
-**Section rules (important):**
-- ONE section per call. Calling `field="Skills"` again **replaces** the whole
-  Skills section — it does not append.
-- Never nest a `##` header inside a section's value. Give each section its own
-  call instead. A `field="Skills"` value must not contain `## Working Style`.
-- Do not send a whole profile as one blob. One key or one section per call.
-- Do not narrate between calls. Make the calls, then summarise once at the end.
-
-**Format rules (FIXED):**
-- `key: value` for all facts — no prose for factual data
-- Free text ONLY inside `## Background`
-
----
-
-### TYPE 2 — Bio (Detailed Life Narrative)
-
-**Purpose:** The user's full story — journey, context, goals. Not injected
-automatically; read it with `get_bio` when you need richer background.
-
-**Format rules (FIXED):**
-- Narrative prose paragraphs under `## headers`
-- ONE section per `update_bio` call. Re-calling a section replaces it.
-- Sections: `## Background` (required), `## Journey` (recommended, `year: entry`
-  per line), `## Goals` (recommended), plus anything person-specific.
-- Keep the whole bio under 200 lines.
-
----
-
-### TYPE 3 — Memory (LLM-Generated Personality Model)
-
-**Purpose:** Inferred traits, patterns, preferences, current context.
-
-**How to access it:** read with `get_memory`, add a trait with
-`add_memory_trait` (one per call, appended), set the focus with `update_focus`.
-
-**Format rules (STRICT):**
-- Valid JSON only — no markdown fences, no commentary
-- Arrays capped at 20 items — the server drops the oldest when full
-- `last_updated` is set by the server on every write
-- `current_context` is overwritten, not appended
-- You cannot overwrite the whole memory object in one call.
-
-**Schema:**
-```json
-{
-  "personality": ["string — observed trait (max 20)"],
-  "observed_patterns": ["string — recurring behaviour (max 20)"],
-  "preferences": {"explanation_style": "string", "code_style": "string",
-                  "feedback_style": "string"},
-  "current_context": {"main_focus": "string", "immediate_next": "string",
-                      "mood": "string — optional"},
-  "last_updated": "YYYY-MM-DD"
-}
-```
-
----
-
-### TYPE 4 — Data Logs (Structured Activity Logs)
-
-**Purpose:** Growing, queryable logs by topic — DSA progress, projects, skills,
-gaming, electronics, interview prep. Never injected automatically; fetch with
-`get_data` when the topic comes up.
-
-**Known topics:** `dsa`, `projects`, `skills`, `cs_fundamentals`, `electronics`,
-`interview`, `steam_games`, `mobile_games`. For any other topic just pass the
-name — the server stores it. You choose the topic string; you never choose a
-path.
-
-**Gaming is split by platform.** There is no `games` topic: use `steam_games`
-for PC/Steam history and `mobile_games` for mobile titles.
-
-**Every data JSON MUST include:**
-- `"summary"` (string) — one line on current state
-- `"last_updated"` (string) — `"YYYY-MM-DD"`
-
-**Which write tool to use — this matters more than anything else here.**
-
-| You want to... | Use |
-|---|---|
-| See what topics exist | `list_topics` |
-| Change a field, add an item, remove an item | **`edit_data`** |
-| Overwrite the entire log | `replace_data` |
-
-**Almost every edit is `edit_data`.** It changes exactly one thing and leaves
-the rest of the log alone, so it cannot destroy data by accident.
-
-`edit_data` takes `op`:
-
-- `set` — change fields. Add `path` to target a container, and
-  `match` to target one item inside an array.
-- `add` — insert a new item into the array at `path`.
-- `remove` — delete the item at `path` that matches `match`.
-- `append` — add entries to a list inside the matched item.
-
-**Address items by name, never by array index.** Indices shift as soon as
-anything is added or removed, so `projects[3]` may be a different project
-tomorrow. Use `match` with a field, e.g. `{"name": "OmniHome"}`. The exact
-names are always visible via `get_data`.
-
-Examples:
-
-```
-edit_data(topic="builds", op="set", path="projects",
-          match={"name": "OmniHome"}, value={"status": "finished"})
-
-edit_data(topic="builds", op="add", path="projects",
-          value={"name": "NewThing", "status": "active"})
-
-edit_data(topic="builds", op="remove", path="projects",
-          match={"name": "OmniHome"})
-
-edit_data(topic="builds", op="append", path="projects",
-          match={"name": "flexygent"}, value={"planned": ["SwiftUI app"]})
-
-edit_data(topic="dsa", op="set", value={"total_solved": 151})
-```
-
-**`replace_data` is destructive.** It overwrites the whole log and anything
-you omit is DELETED. It refuses the write if that would drop existing keys,
-naming them, and tells you to use `edit_data` instead. Pass `allow_drop: true`
-only when you genuinely mean to delete keys. Its `data` argument must be a
-**serialised JSON string**, not an object.
-
-**Always `get_data` first** so you use the exact existing field and item
-names. Names like "OmniHome" must match character for character.
-
-**Never fabricate.** If you were not given real information for a topic, write
-a summary saying it is empty rather than inventing plausible values.
-
----
-
-**Schemas for known topics:**
-
-`dsa`:
-```json
-{
-  "summary": "string", "phases_completed": ["string"],
-  "current_phase": "string", "weak_areas": ["string"], "total_solved": 0,
-  "problems": [{"id": 1, "name": "string", "difficulty": "easy|medium|hard",
-                "status": "solved|attempted|skipped", "date": "YYYY-MM-DD"}],
-  "last_updated": "YYYY-MM-DD"
-}
-```
-
-`projects`:
-```json
-{
-  "summary": "string",
-  "projects": [{"name": "string", "status": "active|paused|completed",
-                "description": "string", "stack": ["string"],
-                "current_milestone": "string", "started": "YYYY-MM-DD"}],
-  "last_updated": "YYYY-MM-DD"
-}
-```
-
-`skills`:
-```json
-{
-  "summary": "string",
-  "languages": {"Python": {"level": "beginner|intermediate|proficient|expert",
-                           "since": "YYYY"}},
-  "frameworks": {}, "tools": {},
-  "last_updated": "YYYY-MM-DD"
-}
-```
-
-`reading`:
-```json
-{
-  "currently_reading": [{"title": "string", "author": "string",
-                         "progress": "string"}],
-  "finished": [{"title": "string", "rating": "string"}],
-  "last_updated": "YYYY-MM-DD"
-}
-```
-
----
-
-### Onboarding a New User
-
-If `get_profile` reports no profile, the user is new:
-
-1. Tell them you have no profile for them yet and ask if they would like to set
-   one up.
-2. **Wait for their answer.** Do not start until they agree.
-3. Ask for, at minimum: name, age, location, occupation, and a short background.
-4. Store it with `update_profile` -- one `## Identity` call, one `## Background`
-   call, plus one call per other section that fits them.
-5. Only then add data logs with `edit_data` for topics they actually
-   mentioned.
-
-**Never guess or fabricate profile or bio data. Every fact must come from the
-user.**
+| Bytes already in context (an attachment, something you generated) | `save_file_base64` |
+| Something large with no URL | host it publicly, then `save_file_from_url` |
+
+The file tools take a `path` inside your client's folder -- sub-folders like
+`images/` or `renders/` are yours to organise. That is the one place a path
+is correct: for data tools you name a *topic* and the server decides where
+it lives.
+
+`save_file_base64` is capped at 8 MB and those bytes are charged to your
+context window, so prefer a URL for anything substantial.
+
+## Logging work
+
+Log before you finish a conversation that did real work. One entry per
+meaningful piece of work, not per tool call.
+
+Only the `summary` is read back later, so make it specific about both what
+was done and what it was about -- "fixed the FlexyGrid pricing table
+overflow on mobile" is useful, "worked on frontend" is not. Add tags so it
+can be found later, and include any files you stored.
+
+To read: no arguments gives the last 24 hours; `date` gives one whole day;
+`since`/`until` gives a range. Call `list_log_days` rather than guessing a
+date. Check `has_more` -- if it is true you are looking at a truncated view,
+so widen the window or raise `limit`.
+
+## Onboarding a new user
+
+If `get_profile` reports no profile, say so and ask whether they would like
+to set one up. **Wait for their answer** before writing anything. Then ask
+for at minimum name, age, location, occupation, and a short background, and
+store it one section per call. Only afterwards add data topics, and only for
+subjects they actually mentioned.
 """
+
+# Marked destructive in the generated list so the warning is visible in the
+# same place an agent decides which tool to reach for.
+_DESTRUCTIVE = {"replace_data", "delete_file"}
+
+
+def _tool_lines(server):
+    """Build the tool list from the live registry.
+
+    Reading ``server._tool_functions`` means this list is whatever the
+    server actually exposes. A tool cannot be registered without showing up
+    here, which is what stops this block from drifting out of date.
+    """
+    funcs = getattr(server, "_tool_functions", None) or {}
+    if not funcs:
+        return ["- (no tools registered)"]
+    return [
+        f"- `{name}`" + (" **DESTRUCTIVE**" if name in _DESTRUCTIVE else "")
+        for name in funcs
+    ]
+
+
+def build_instructions(server) -> str:
+    """Return the instruction block for this server, tool list included."""
+    lines = _tool_lines(server)
+    return _TEMPLATE.format(count=len(lines), tool_list="\n".join(lines))

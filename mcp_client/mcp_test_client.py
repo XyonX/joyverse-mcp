@@ -250,8 +250,6 @@ def main():
     log("joyverse-mcp :: LLM client test", CYAN)
     log("=" * 62)
 
-    from joyverse.prompts import USER_DATA
-
     if args.url:
         # Remote mode: talk to a deployed server over real HTTP. Do NOT import
         # run.py here -- it builds a local boto3 client we have no use for.
@@ -292,8 +290,12 @@ def main():
     llm = OpenAI(**kwargs)
     log(f"llm: {MODEL} via {base_url or 'api.openai.com'}")
 
-    system = (f"{USER_DATA}\n\n---\n\nYou are helping {username}. "
-              f"Use the available tools to read and write their data.")
+    # The instructions the server actually sent, rather than a local copy of
+    # them. That is what this client exists to exercise, and it keeps working
+    # in remote mode where run.py is deliberately never imported.
+    system = (f"{info.get('instructions', '')}\n\n---\n\nYou are helping "
+              f"{username}. Use the available tools to read and write "
+              f"their data.")
 
     persona_path = Path(__file__).resolve().parent / "persona.md"
     persona = persona_path.read_text() if persona_path.exists() else ""

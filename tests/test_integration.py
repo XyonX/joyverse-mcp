@@ -25,11 +25,11 @@ def build_server():
         get_file, list_files, delete_file)
     from joyverse.uploads import save_file_base64
     from joyverse.logs import add_to_log, get_log, list_log_days
-    from joyverse.prompts import USER_DATA
+    from joyverse.prompts import build_instructions
 
     srv = MCPServer(
         name="joyverse-mcp", version="1.0.0",
-        auth=jv_auth.jwt_auth, instructions=USER_DATA,
+        auth=jv_auth.jwt_auth,
     )
     srv.tool(description="Get the user's personal profile")(get_profile)
     srv.tool(description="Update a field in the user profile")(update_profile)
@@ -53,6 +53,9 @@ def build_server():
     srv.tool(description="Record something that happened")(add_to_log)
     srv.tool(description="Read back the log")(get_log)
     srv.tool(description="List days with logs")(list_log_days)
+    # Same ordering as run.py: instructions can only be built once the
+    # registry is complete, or the tool list inside them is incomplete.
+    srv.instructions = build_instructions(srv)
     return srv
 
 
