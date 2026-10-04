@@ -1,6 +1,6 @@
 import difflib
 import json
-from typing import Dict, List
+from typing import Any, Dict, List, Optional
 
 from joyverse.config import r2_client, BUCKET_NAME, get_data_key
 
@@ -224,7 +224,16 @@ def _find(items, match):
 
 
 def _merge(base, patch):
-    """RFC 7386 merge patch: nested objects merge, everything else replaces."""
+    """RFC 7386 merge patch: nested objects merge, everything else replaces.
+
+    A non-dict patch used to raise AttributeError here, which the router
+    surfaced as an opaque "Server Error". That is reachable whenever `set`
+    addresses a path holding an object while `value` is a scalar, so it is
+    handled at the point of failure rather than by guessing beforehand.
+    """
+    if not isinstance(patch, dict):
+        raise ValueError(
+            f"merge patch must be an object, got {type(patch).__name__}")
     for k, v in patch.items():
         if v is None:
             base.pop(k, None)
@@ -279,18 +288,80 @@ def update_data(topic: str, data: str, user: dict) -> str:
 # GRANULAR EDITING
 # ==========================================
 
-def edit_data(topic: str, op: str, value=None, path=None, match=None,
+def _coerce_structured(value):
+    """Accept a JSON object/array, or a string holding one.
+
+    The published schema once declared `value` as a string, so every agent had
+    to send serialised JSON. RFC 7386 merge then stored that string verbatim
+    where a list belonged -- a silent corruption that returned ok:true. A
+    client that ignores the schema must not be able to corrupt a topic, so the
+    string form is parsed rather than trusted.
+    """
+    if not isinstance(value, str):
+        return value, None
+    stripped = value.strip()
+    if not stripped or stripped[0] not in "{[":
+        # A plain string is a legitimate value (a name, a status); leave it.
+        return value, None
+
+    # It opens like JSON. If it also closes like JSON it must parse, or the
+    # caller sent something malformed -- refusing is the only safe answer,
+    # because storing it verbatim puts a JSON-looking string into a field.
+    if stripped[-1] in "}]":
+        try:
+            return json.loads(stripped), None
+        except json.JSONDecodeError as e:
+            return None, f"value looks like JSON but did not parse: {e}"
+
+    # It opens like JSON but does not close. That is either a truncated
+    # payload -- which must never be stored -- or an ordinary string that
+    # happens to start with a brace. Ambiguous by nature, so the safe side is
+    # to refuse: a caller who meant a plain string can resend it, whereas a
+    # silently stored fragment corrupts the topic with no way to notice.
+    # A JSON object always opens with a quoted key: {"name": ...}. Prose like
+    # "{not json at all" does not. That is the signal separating an ordinary
+    # string value from a truncated JSON payload -- brace counts cannot tell
+    # them apart, since both open without closing.
+    if stripped[1:2] != chr(34):
+        return value, None
+    return None, ("value opens like JSON but is not closed -- it looks "
+                  "truncated.")
+
+
+def edit_data(topic: str, op: str, value: Any = None,
+              path: Optional[list] = None,
+              match: Optional[Dict[str, Any]] = None,
               user: dict = None) -> str:
     """Change one thing inside a data log without disturbing the rest.
 
     Items are addressed by matching a field (`match`), never by array index:
     indices shift as soon as anything is added or removed.
+
+    `value`, `match` and `path` take real JSON structures. A JSON-encoded
+    string is also accepted for `value` and parsed, so a client working from
+    an older schema cannot corrupt a topic.
     """
     user_id = user["user_id"]
     try:
         key = get_data_key(user_id, topic)
     except ValueError as e:
         return json.dumps({"error": f"Invalid topic: {e}"})
+
+    value, coerce_error = _coerce_structured(value)
+    if coerce_error:
+        return json.dumps({"error": f"Invalid value: {coerce_error}",
+                           "hint": "Send a JSON object or array directly, "
+                                   "or a JSON string that parses."})
+
+    # match was published as a string for the same reason value was, so a
+    # string form reaches us here too.
+    match, match_error = _coerce_structured(match)
+    if match_error:
+        return json.dumps({"error": f"Invalid match: {match_error}"})
+    if match is not None and not isinstance(match, dict):
+        return json.dumps({"error": "match must be an object.",
+                           "got": type(match).__name__})
+
 
     raw = None
     try:
@@ -301,6 +372,8 @@ def edit_data(topic: str, op: str, value=None, path=None, match=None,
 
     doc = json.loads(raw.decode("utf-8")) if raw else {}
     match = match or {}
+
+
     parent, last = _walk(doc, path) if path else (doc, None)
 
     try:
@@ -323,9 +396,11 @@ def edit_data(topic: str, op: str, value=None, path=None, match=None,
                 items[idx] = item
             elif path:
                 target = parent.setdefault(last, {})
-                if isinstance(target, dict):
-                    _merge(target, value or {})
+                if isinstance(target, dict) and isinstance(value, dict):
+                    _merge(target, value)
                 else:
+                    # setdefault left a {} for an absent key; a scalar belongs
+                    # there directly rather than being merged as a patch.
                     parent[last] = value
             else:
                 _merge(doc, value or {})
