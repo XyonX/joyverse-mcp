@@ -72,6 +72,53 @@ class TestAddToLog:
             logs.add_to_log("x", tags="notalist", user=ALICE))
 
 
+class TestClientAttributionWarning:
+    """`client` was filled with the project name (nextbiz-studio) because
+    nothing in the wire contract said the field names the assistant doing
+    the logging. The entry is stored as given -- rejecting would trade a
+    mislabelled row for a lost row -- but the reply warns, so the model can
+    correct itself in the same turn.
+    """
+
+    def test_unregistered_client_is_stored_but_warns(self, fake_r2):
+        out = json.loads(logs.add_to_log(
+            "Built the NextBiz Studio carousel", client="nextbiz-studio",
+            tags=["instagram"], user=ALICE))
+        assert out["ok"] is True
+        assert out["logged"]["client"] == "nextbiz-studio"
+        warning = out["warning"]
+        assert warning["client"] == "nextbiz-studio"
+        assert warning["registered_clients"] == []
+        assert "not the project" in warning["message"].lower()
+        assert "register_client" in warning["hint"]
+
+    def test_registered_client_does_not_warn(self, fake_r2):
+        from joyverse import storage
+        storage.register_client("chatgpt", user=ALICE)
+        out = json.loads(logs.add_to_log("x", client="chatgpt", user=ALICE))
+        assert out["ok"] is True
+        assert "warning" not in out
+
+    def test_registered_name_matches_case_insensitively(self, fake_r2):
+        from joyverse import storage
+        storage.register_client("chatgpt", user=ALICE)
+        out = json.loads(logs.add_to_log("x", client="ChatGPT", user=ALICE))
+        assert "warning" not in out
+
+    def test_client_that_is_also_a_tag_is_called_out(self, fake_r2):
+        """The signature of the real failure: the topic filled both fields."""
+        plain = json.loads(logs.add_to_log(
+            "x", client="nextbiz-studio", tags=["instagram"], user=ALICE))
+        assert "tell-tale" not in plain["warning"]["message"].lower()
+        both = json.loads(logs.add_to_log(
+            "x", client="nextbiz-studio", tags=["nextbiz-studio"], user=ALICE))
+        assert "tell-tale" in both["warning"]["message"].lower()
+
+    def test_no_client_argument_no_warning(self, fake_r2):
+        out = json.loads(logs.add_to_log("x", user=ALICE))
+        assert "warning" not in out
+
+
 class TestDateAndWindow:
     def test_date_must_be_iso(self, fake_r2):
         for bad in ["2026-1-1", "01-10-2026", "yesterday", "2026/10/01"]:

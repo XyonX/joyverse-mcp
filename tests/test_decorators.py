@@ -296,3 +296,69 @@ class TestEveryToolSchemaMatchesItsSignature:
                         f"{name}.{param}: published {spec.get('type')}, "
                         f"signature says {want}")
         assert not mismatches, mismatches
+
+
+class TestParamDocs:
+    """Per-parameter descriptions inside the published schema.
+
+    add_to_log's `client` shipped as a bare {"type": "string"} and agents
+    guessed its meaning from the conversation -- in agency-flavoured chats
+    that guess landed on "who the work is for". A model chooses argument
+    values from the schema, so the description belongs there too.
+    """
+
+    def test_doc_lands_in_the_property(self):
+        def fn(a: str, b: int = 1):
+            ...
+        schema = infer_input_schema(fn, {"b": "b is the count"})
+        assert schema["properties"]["b"]["description"] == "b is the count"
+        assert schema["properties"]["b"]["type"] == "integer"
+        assert schema["properties"]["a"] == {"type": "string"}
+
+    def test_omitted_docs_change_nothing(self):
+        def fn(a: str):
+            ...
+        assert infer_input_schema(fn)["properties"] == {"a": {"type": "string"}}
+
+    def test_doc_for_an_absent_param_is_ignored(self):
+        def fn(a: str):
+            ...
+        schema = infer_input_schema(fn, {"nope": "ghost param"})
+        assert "nope" not in schema["properties"]
+
+    def test_doc_on_an_any_typed_param_keeps_the_empty_schema(self):
+        def fn(a: typing.Any = None):
+            ...
+        schema = infer_input_schema(fn, {"a": "whatever"})
+        assert schema["properties"]["a"] == {"description": "whatever"}
+
+    def test_decorator_publishes_param_docs(self):
+        server = FakeServer()
+        tool = create_tool_decorator(server)
+
+        @tool(description="d", param_docs={"a": "a doc"})
+        def fn(a: str):
+            ...
+
+        prop = server._tool_schemas[0].inputSchema["properties"]["a"]
+        assert prop == {"type": "string", "description": "a doc"}
+
+
+class TestRealToolsUseParamDocs:
+    """Drift guard: the tool whose bug introduced param_docs must keep
+    documenting `client`, or the fix quietly disappears while the framework
+    keeps passing the tests above.
+    """
+
+    @pytest.fixture(scope="class")
+    def schemas(self):
+        import run
+        return {s.name: s for s in run.server._tool_schemas}
+
+    def test_add_to_log_client_is_documented_in_the_schema(self, schemas):
+        prop = schemas["add_to_log"].inputSchema["properties"]["client"]
+        assert prop["type"] == "string"
+        doc = prop["description"].lower()
+        assert "not the project" in doc
+        assert "tags" in doc
+        assert "list_clients" in doc

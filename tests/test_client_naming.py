@@ -118,3 +118,13 @@ class TestInstructionsAreAccurate:
         assert "server decides where it lives" in low
         # And the file tools must still be told to use a path.
         assert "take a `path`" in low
+
+    def test_instructions_say_who_the_log_client_is(self, instructions):
+        """`client` on add_to_log was filled with the project name because
+        nothing in the instructions connected the field to the assistant's
+        identity. The fix states it in the Logging section, where the model
+        reads it right before deciding what to pass."""
+        low = instructions.lower()
+        assert "the `client` on `add_to_log` is **you**" in low
+        assert "never the project" in low
+        assert "that is what `tags` are for" in low
