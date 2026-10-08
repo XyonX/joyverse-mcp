@@ -22,9 +22,9 @@ class ResourceRegistry:
 
     Three registration styles, because servers legitimately need all three:
 
-    * `add_resource` -- a fixed URI such as ``joyverse://profile``.
+    * `add_resource` -- a fixed URI such as ``notes://profile``.
     * `add_template` -- a parameterised URI such as
-      ``joyverse://data/{topic}``, advertised via resources/templates/list.
+      ``notes://items/{id}``, advertised via resources/templates/list.
     * `add_prefix_reader` -- a family of URIs whose members are only known at
       request time (a per-user set of records, say). The reader is consulted
       after exact and template lookups both miss.

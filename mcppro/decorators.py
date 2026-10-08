@@ -15,7 +15,7 @@ TYPE_MAP = {
     # Any means "whatever the caller sends". JSON Schema has no single type for
     # that, so an empty schema (meaning "no constraint") is the honest answer.
     # Publishing "string" here is what told agents to send a JSON string where
-    # an object was meant, silently corrupting stored topics.
+    # an object was meant, silently corrupting the data the tool stores.
     Any: "",
     # Parametrised aliases like Dict[str, Any] and List[str] are not `dict` or
     # `list` themselves, so they needed their origin type looked up.
@@ -27,9 +27,8 @@ def _unwrap_optional(python_type):
     """Reduce Optional[X] / X | None to X.
 
     `Optional[list]` is a Union, not a `list`, so a direct lookup in TYPE_MAP
-    missed and fell through to the "string" default. That published three
-    list parameters as strings -- add_to_log.tags, add_to_log.files and
-    get_log.tags -- and the agents rejected the calls rather than guessing.
+    missed and fell through to the "string" default. That published list
+    parameters as strings, and agents rejected the calls rather than guessing.
 
     A parameter that is Optional is not required, so `required` is already
     driven by the default value; unwrapping only affects the advertised type.
@@ -52,10 +51,16 @@ def _unwrap_optional(python_type):
     return python_type
 
 
-def infer_input_schema(func) -> Dict[str, Any]:
+def infer_input_schema(func, param_docs: Dict[str, str] = None) -> Dict[str, Any]:
     """
     Inspects a Python function and generates a JSON Schema
     matching MCP's inputSchema format.
+
+    `param_docs` documents individual parameters inside the schema. The tool
+    description explains the call; these explain each argument, which is
+    what a model reads when choosing values. An optional parameter with no
+    description has its meaning guessed from the surrounding conversation --
+    a guess is exactly what per-parameter documentation prevents.
     """
     try:
         sig = inspect.signature(func)
@@ -65,6 +70,7 @@ def infer_input_schema(func) -> Dict[str, Any]:
 
     properties = {}
     required = []
+    param_docs = param_docs or {}
 
     for param_name, param in sig.parameters.items():
         # Skip 'self' or injected context params
@@ -77,7 +83,15 @@ def infer_input_schema(func) -> Dict[str, Any]:
 
         # An empty JSON type means "accepts anything" -- publish an empty
         # schema rather than an empty string, which is not a valid type.
-        properties[param_name] = ({"type": json_type} if json_type else {})
+        prop = {"type": json_type} if json_type else {}
+
+        # Per-parameter documentation, when the caller supplied any. Keys
+        # that name parameters the function does not have are simply never
+        # consulted, so a typo fails visibly as a missing description rather
+        # than breaking registration.
+        if param_name in param_docs:
+            prop["description"] = param_docs[param_name]
+        properties[param_name] = prop
 
         # If parameter has no default value, it's required
         if param.default is inspect.Parameter.empty:
@@ -98,10 +112,12 @@ def create_tool_decorator(server_instance):
     Omitting it leaves the tool open to any authenticated caller, so existing
     registrations keep working unchanged.
     """
-    def tool(description: str = "", scopes=None):
+    def tool(description: str = "", scopes=None,
+             param_docs: Dict[str, str] = None):
         def decorator(func):
-            # 1. Infer schema from function signature
-            input_schema = infer_input_schema(func)
+            # 1. Infer schema from function signature, folding in any
+            #    per-parameter documentation.
+            input_schema = infer_input_schema(func, param_docs)
             
             # 2. Create MCP Tool Definition
             tool_def = MCPToolDefinition(
