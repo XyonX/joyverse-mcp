@@ -147,6 +147,10 @@ def add_to_log(summary: str, client: str = None, tags: Optional[list] = None,
     Call this before finishing a conversation that did real work. The summary
     is the only part anyone reads back, so make it specific: say what was done
     and what it was about, not "worked on stuff".
+
+    `client` is the assistant's own product name (chatgpt, claude, ...) -- the
+    identity doing the logging, never the subject of the work, which belongs
+    in `tags`.
     """
     user_id = user["user_id"]
     if not isinstance(summary, str) or not summary.strip():
@@ -171,6 +175,41 @@ def add_to_log(summary: str, client: str = None, tags: Optional[list] = None,
             return json.dumps({"error": "files must be a list of paths."})
         entry["files"] = [str(f)[:300] for f in files][:20]
 
+    # `client` is meant to be the assistant's own registered name, but
+    # nothing in the wire contract used to say so -- and in agency-flavoured
+    # conversations the word reads as "who the work is for", which is how a
+    # topic (nextbiz-studio) landed in the field while the real author
+    # (chatgpt) went unnamed. A name missing from the caller's registry is
+    # almost always that mix-up. The entry is still stored as given --
+    # rejecting would trade a mislabelled row for a lost one -- but the reply
+    # carries a warning the model can act on in the same turn.
+    warning = None
+    if client:
+        try:
+            from joyverse.storage import _load_clients
+            registered = sorted(_load_clients(user_id)["clients"])
+        except Exception:
+            # Fail open: a registry hiccup must never block a log.
+            registered = None
+        clean_client = str(client).strip().lower()
+        if registered is not None and clean_client not in registered:
+            warning = {
+                "client": str(client),
+                "message": "client is YOUR name as the assistant doing the "
+                           "work (e.g. chatgpt, claude), not the project or "
+                           "brand the work was about -- the subject goes in "
+                           "tags.",
+                "registered_clients": registered,
+                "hint": "Log again with client set to your own name. If "
+                        f"'{client}' really is the product you are, register "
+                        "it once with register_client and keep using it.",
+            }
+            if clean_client in {str(t).strip().lower()
+                                for t in entry.get("tags", [])}:
+                warning["message"] += (" This name also appears in your tags, "
+                                       "which is the tell-tale sign it is a "
+                                       "topic, not an assistant.")
+
     try:
         _append_day(user_id, _day_str(now), entry)
     except ValueError as e:
@@ -178,13 +217,16 @@ def add_to_log(summary: str, client: str = None, tags: Optional[list] = None,
     except Exception as e:
         return json.dumps({"error": f"Could not log: {e}"})
 
-    return json.dumps({
+    out = {
         "ok": True,
         "logged": entry,
         "date": _day_str(now),
         "hint": "Use the files returned by save_file_* in `files` to link this "
                 "entry to what you stored.",
-    })
+    }
+    if warning:
+        out["warning"] = warning
+    return json.dumps(out)
 
 
 def _resolve_window(date, since, until):

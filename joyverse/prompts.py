@@ -64,8 +64,9 @@ accumulate over time.
 - **Claim a client name once, then reuse it.** Call `list_clients` first; if
   your name is already there, use it. A second name splits your files across
   folders nobody expects. Use the plain product name (`chatgpt`, `claude`,
-  `hermes`) and keep it stable. You only need to register in order to WRITE --
-  reading another client's file just needs its name.
+  `hermes`) and keep it stable -- the name identifies the assistant you are,
+  never the project you are working on. You only need to register in order to
+  WRITE -- reading another client's file just needs its name.
 - **Never fabricate.** If you were not given real information, record that it
   is empty rather than inventing plausible values. Every profile and bio fact
   must come from the user.
@@ -103,6 +104,10 @@ Only the `summary` is read back later, so make it specific about both what
 was done and what it was about -- "fixed the FlexyGrid pricing table
 overflow on mobile" is useful, "worked on frontend" is not. Add tags so it
 can be found later, and include any files you stored.
+
+The `client` on `add_to_log` is **you** -- the assistant writing the entry,
+under the same name you use for file storage. It is never the project, brand
+or person the work was about; that is what `tags` are for.
 
 To read: no arguments gives the last 24 hours; `date` gives one whole day;
 `since`/`until` gives a range. Call `list_log_days` rather than guessing a

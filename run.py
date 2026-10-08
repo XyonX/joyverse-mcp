@@ -172,14 +172,29 @@ server.tool(description=(
     "for anything large host it publicly and use save_file_from_url."),
     scopes=[WRITE_SCOPE])(save_file_base64)
 
+# `client` is the one argument a model guesses wrong: in an agency-style
+# conversation ("work for the NextBiz Studio brand") the word reads as "who
+# the work is for", and the project name went into the field while the
+# assistant's own identity never appeared. The description says what the
+# field is, and the per-parameter doc -- the part a model reads when picking
+# argument values -- repeats it where the decision is actually made.
 server.tool(description=(
     "Record one thing that happened, so a later conversation can recall it. "
     "Call this before you finish a conversation that did real work -- the "
     "summary is the only part anyone reads back, so make it specific: say what "
     "was done AND what it was about. 'Fixed FlexyGrid pricing table overflow' "
     "is useful; 'worked on frontend' is not. Add tags so it can be found later, "
-    "and include any files you stored."),
-    scopes=[WRITE_SCOPE])(add_to_log)
+    "and include any files you stored. client is YOUR own name as an "
+    "assistant (chatgpt, claude, hermes...), never the project or brand the "
+    "work was about -- that goes in tags."),
+    scopes=[WRITE_SCOPE],
+    param_docs={
+        "client": "Your own product name as the assistant doing the work "
+                  "(chatgpt, claude, hermes...), the same name you use for "
+                  "file storage. NOT the project, brand or person the work "
+                  "is about -- put that in tags instead. Call list_clients "
+                  "and reuse your exact existing name.",
+    })(add_to_log)
 
 server.tool(description=(
     "Read back what was logged. With no arguments, returns the last 24 hours -- "
