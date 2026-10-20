@@ -202,10 +202,23 @@ def _walk(container, path):
 
     Only dicts are traversed: addressing an array by index is unsafe because
     indices shift whenever an item is added or removed.
+
+    `path` accepts a dotted string ("items.rules") OR a list of segments
+    (["items", "rules"]) — the inputSchema advertises an array, so the
+    advertised form must work, not 500 with "'['items']' is not a list".
+    Empty/None paths resolve to the container root.
     """
-    if not path:
+    if path is None or path == "" or path == []:
         return container, None
-    parts = str(path).split(".")
+    if isinstance(path, str):
+        parts = [p for p in path.split(".") if p]
+    elif isinstance(path, (list, tuple)):
+        # stringify defensively: clients may send numbers/None segments
+        parts = [str(p) for p in path if p not in (None, "")]
+        if not parts:
+            return container, None
+    else:
+        raise ValueError(f"path must be a dotted string or a list, got {type(path).__name__}.")
     node = container
     for part in parts[:-1]:
         if not isinstance(node, dict):

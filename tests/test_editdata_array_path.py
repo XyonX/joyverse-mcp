@@ -1,0 +1,140 @@
+"""Regression for r-joyverse-editdata-schema-bug (reported by Tony, Oct 2026).
+
+edit_data's inputSchema advertises `path` as an ARRAY (Optional[list]), but
+_walk() did str(path).split('.') — a client following the advertised schema
+sent path=["items"] and hit "'['items']' is not a list" because the stringified
+array "['items']" was used as a dict key. The fix normalizes BOTH forms:
+the advertised array AND the legacy dotted string.
+
+Contract proven here:
+  1. array path behaves identically to the equivalent dotted-string path
+  2. dotted string still works (Tony's in-the-wild workaround keeps working)
+  3. match-based set/add/remove ops work through an array path
+  4. None/empty path still addresses the document root
+"""
+import json
+
+import pytest
+
+from joyverse.data import _walk, edit_data
+
+
+@pytest.fixture
+def doc():
+    return {
+        "purpose": "test doc",
+        "items": [
+            {"id": "a", "name": "Alpha", "on": True},
+            {"id": "b", "name": "Beta", "on": False},
+        ],
+    }
+
+
+class TestWalkAcceptsArrayPath:
+    def test_array_path_equivalent_to_dotted(self, doc):
+        assert _walk(doc, ["items"]) == _walk(doc, "items")
+        # nested
+        d1 = {"a": {"b": {"c": 1}}}
+        assert _walk(d1, ["a", "b"]) == _walk(d1, "a.b")
+
+    def test_array_path_resolves_the_advertised_schema_form(self, doc):
+        # the exact form from the bug report: path=["items"], match={...}
+        parent, last = _walk(doc, ["items"])
+        assert last == "items"
+        assert isinstance(parent.get(last), list)
+        assert parent[last][0]["id"] == "a"
+
+    def test_none_and_empty_paths_are_the_root(self, doc):
+        assert _walk(doc, None) == (doc, None)
+        assert _walk(doc, "") == (doc, None)
+        assert _walk(doc, []) == (doc, None)
+
+    def test_stringified_array_is_not_used_as_a_key(self, doc):
+        # pre-fix behaviour: "['items']" became a literal key, then ops
+        # failed with "'['items']' is not a list". After the fix, no
+        # such key may exist after an array-path walk.
+        _walk(doc, ["items"])
+        assert "['items']" not in doc
+        assert "['items']" not in doc.get("items", {})
+
+    def test_bad_type_raises_clearly(self, doc):
+        with pytest.raises(ValueError):
+            _walk(doc, 5)
+
+    def test_non_object_traversal_raises(self, doc):
+        with pytest.raises(ValueError):
+            _walk(doc, "items.0.on")  # array element is not a dict traversal
+
+
+class TestEditDataThroughArrayPath:
+    """Full edit_data contract through the advertised array form.
+
+    Uses monkeypatched storage so no real R2/S3 is touched.
+    """
+
+    @pytest.fixture
+    def stored(self, monkeypatch, doc):
+        from joyverse import data as data_mod
+        monkeypatch.setattr(data_mod, "_snapshot", lambda *a, **k: None)
+        # edit_data reads via r2_client.get_object (key from get_data_key);
+        # patch the client so no real S3 call ever happens
+        class FakeBody:
+            def __init__(self, raw): self.raw = raw
+            def read(self): return self.raw
+        class FakeR2:
+            def __init__(self): self.raw = json.dumps(doc).encode()
+            def get_object(self, Bucket=None, Key=None):
+                if self.raw is None:
+                    raise Exception("NoSuchKey")
+                return {"Body": FakeBody(self.raw)}
+            def put_object(self, Bucket=None, Key=None, Body=None, **kw):
+                if isinstance(Body, bytes):
+                    self.raw = Body
+                elif Body is not None:
+                    self.raw = Body.encode()
+                return {}
+        fake = FakeR2()
+        monkeypatch.setattr(data_mod, "r2_client", fake)
+        return fake
+
+    def test_set_with_match_via_array_path(self, stored):
+        out = edit_data(topic="t", op="set", value={"on": False},
+                        path=["items"], match={"id": "a"},
+                        user={"user_id": "u_a1b2c3d4e5f6"})
+        res = json.loads(out)
+        assert res.get("ok") is True
+        saved_doc = json.loads(stored.raw.decode())
+        assert saved_doc["items"][0]["on"] is False
+        # sibling untouched — the whole bug class was "wrong item edited"
+        assert saved_doc["items"][1]["on"] is False
+
+    def test_dotted_string_still_works(self, stored):
+        # Tony's in-the-wild workaround must not regress
+        out = edit_data(topic="t", op="set", value={"on": True},
+                        path="items", match={"id": "b"},
+                        user={"user_id": "u_a1b2c3d4e5f6"})
+        assert json.loads(out).get("ok") is True
+        saved_doc = json.loads(stored.raw.decode())
+        assert saved_doc["items"][1]["on"] is True
+
+    def test_add_via_array_path(self, stored):
+        out = edit_data(topic="t", op="add", value={"id": "c", "name": "Gamma"},
+                        path=["items"], user={"user_id": "u_a1b2c3d4e5f6"})
+        assert json.loads(out).get("ok") is True
+        saved_doc = json.loads(stored.raw.decode())
+        assert [i["id"] for i in saved_doc["items"]] == ["a", "b", "c"]
+
+    def test_remove_via_array_path(self, stored):
+        out = edit_data(topic="t", op="remove", match={"id": "a"},
+                        path=["items"], user={"user_id": "u_a1b2c3d4e5f6"})
+        assert json.loads(out).get("ok") is True
+        saved_doc = json.loads(stored.raw.decode())
+        assert [i["id"] for i in saved_doc["items"]] == ["b"]
+
+    def test_root_merge_without_path(self, stored):
+        out = edit_data(topic="t", op="set", value={"purpose": "changed"},
+                        user={"user_id": "u_a1b2c3d4e5f6"})
+        assert json.loads(out).get("ok") is True
+        saved_doc = json.loads(stored.raw.decode())
+        assert saved_doc["purpose"] == "changed"
+        assert len(saved_doc["items"]) == 2  # nothing dropped
