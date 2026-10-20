@@ -4,8 +4,8 @@ import pytest
 from joyverse import bio as bio_mod
 
 
-USER = {"username": "joydip"}
-KEY = "users/joydip/bio.md"
+USER = {"user_id": "u_a1b2c3d4e5f6"}
+KEY = "users/u_a1b2c3d4e5f6/bio.md"
 BIO_MD = """# User Biography
 
 ## Background
@@ -28,7 +28,7 @@ class TestGetBio:
 
     def test_missing_bio_returns_json_error(self, fake_r2):
         out = json.loads(bio_mod.get_bio(USER))
-        assert "error" in out and "joydip" in out["error"]
+        assert "error" in out and "u_a1b2c3d4e5f6" in out["error"]
 
     def test_r2_failure_returns_json_error(self, fake_r2, monkeypatch):
         def boom(Bucket, Key):
@@ -143,8 +143,8 @@ class TestMultilineContent:
 
 
 class TestErrors:
-    def test_traversal_username_rejected(self, fake_r2):
-        out = bio_mod.get_bio({"username": "../evil"})
+    def test_traversal_user_id_rejected(self, fake_r2):
+        out = bio_mod.get_bio({"user_id": "../evil"})
         assert "error" in json.loads(out)
         assert fake_r2.puts == []
 
@@ -163,11 +163,11 @@ class TestErrors:
 
 class TestUserIsolation:
     def test_updates_do_not_cross_users(self, fake_r2):
-        fake_r2.seed("users/alice/bio.md", "## Background\nAlice's story\n")
+        fake_r2.seed("users/u_0a1b2c3d4e5f/bio.md", "## Background\nAlice's story\n")
         bio_mod.update_bio("Background", "Aarav's story", USER)
-        assert "Alice's story" in fake_r2.store["users/alice/bio.md"].decode()
+        assert "Alice's story" in fake_r2.store["users/u_0a1b2c3d4e5f/bio.md"].decode()
 
     def test_missing_user_sees_no_other_bio(self, fake_r2):
-        fake_r2.seed("users/joydip/bio.md", "SECRET STORY\n")
-        out = json.dumps(json.loads(bio_mod.get_bio({"username": "carol"})))
+        fake_r2.seed("users/u_a1b2c3d4e5f6/bio.md", "SECRET STORY\n")
+        out = json.dumps(json.loads(bio_mod.get_bio({"user_id": "u_carolcafe1234"[:2]+"c0ffee123456"[:12]})))
         assert "SECRET" not in out

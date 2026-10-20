@@ -3,11 +3,11 @@ from joyverse.config import r2_client, BUCKET_NAME, get_profile_key
 
 def get_profile(user: dict) -> str:
     """Reads the user profile from R2."""
-    username = user["username"]
+    user_id = user["user_id"]
     try:
-        key = get_profile_key(username)
+        key = get_profile_key(user_id)
     except ValueError as e:
-        return json.dumps({"error": f"Invalid username: {e}"})
+        return json.dumps({"error": f"Invalid user_id: {e}"})
 
     try:
         response = r2_client.get_object(Bucket=BUCKET_NAME, Key=key)
@@ -15,7 +15,7 @@ def get_profile(user: dict) -> str:
     except Exception as e:
         if "NoSuchKey" in str(e):
             return json.dumps(
-                {"error": f"No profile found for {username}. "
+                {"error": f"No profile found for {user_id}. "
                           f"Create one with update_profile."})
         return json.dumps({"error": f"R2 error: {str(e)}"})
 
@@ -27,11 +27,11 @@ def update_profile(field: str, value: str, user: dict) -> str:
     section header ("Identity" / "## Identity"), in which case the value is
     written as a block under that section.
     """
-    username = user["username"]
+    user_id = user["user_id"]
     try:
-        key = get_profile_key(username)
+        key = get_profile_key(user_id)
     except ValueError as e:
-        return f"Error: Invalid username: {e}"
+        return f"Error: Invalid user_id: {e}"
 
     try:
         response = r2_client.get_object(Bucket=BUCKET_NAME, Key=key)

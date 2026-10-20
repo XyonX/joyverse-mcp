@@ -4,8 +4,8 @@ import pytest
 from joyverse import data as dat
 
 
-USER = {"username": "joydip"}
-KEY = "users/joydip/data/dsa/progress.json"
+USER = {"user_id": "u_a1b2c3d4e5f6"}
+KEY = "users/u_a1b2c3d4e5f6/data/dsa/progress.json"
 
 
 class TestGetData:
@@ -62,8 +62,8 @@ class TestTopicTraversalRegression:
     read/write outside their own users/<name>/ prefix."""
 
     def test_traversal_topic_does_not_escape(self, fake_r2):
-        fake_r2.seed("users/joydip/profile.md", "SECRET")
-        out = dat.get_data("../../../joydip", USER)
+        fake_r2.seed("users/u_a1b2c3d4e5f6/profile.md", "SECRET")
+        out = dat.get_data("../../../victim", USER)
         assert "error" in json.loads(out) or "SECRET" not in out
 
     def test_traversal_topic_cannot_write_outside(self, fake_r2):
@@ -80,7 +80,7 @@ class TestTopicTraversalRegression:
 
 class TestUserIsolation:
     def test_topics_are_namespaced_per_user(self, fake_r2):
-        dat.update_data("dsa", '{"who":"alice"}', {"username": "alice"})
+        dat.update_data("dsa", '{"who":"alice"}', {"user_id": "u_0a1b2c3d4e5f"})
         dat.update_data("dsa", '{"who":"bob"}', USER)
-        assert fake_r2.get_json("users/alice/data/dsa/progress.json") == {"who": "alice"}
+        assert fake_r2.get_json("users/u_0a1b2c3d4e5f/data/dsa/progress.json") == {"who": "alice"}
         assert fake_r2.get_json(KEY) == {"who": "bob"}

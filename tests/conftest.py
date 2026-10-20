@@ -22,6 +22,14 @@ import joyverse.auth as jv_auth  # noqa: E402
 TEST_SECRET = "test-secret-not-a-real-one"
 TEST_BUCKET = "test-bucket"
 
+# user_ids are server-minted as "u_" + 12 lowercase hex chars. Tests use fixed
+# values rather than identity.new_user_id() so the expected R2 keys stay
+# readable and assertable.
+TEST_USER_ID = "u_a1b2c3d4e5f6"
+TEST_USER_ID_2 = "u_0a1b2c3d4e5f"
+TEST_USER = {"user_id": TEST_USER_ID}
+TEST_USER_2 = {"user_id": TEST_USER_ID_2}
+
 
 @pytest.fixture
 def anyio_backend():
@@ -48,13 +56,80 @@ class FakeR2:
             raise NoSuchKey(f"NoSuchKey: The specified key does not exist. {Key}")
         return {"Body": io.BytesIO(self.store[Key])}
 
-    def put_object(self, Bucket, Key, Body, ContentType=None):
+    def put_object(self, Bucket, Key, Body, ContentType=None, Metadata=None):
         if isinstance(Body, str):
             Body = Body.encode("utf-8")
+        elif hasattr(Body, "read"):
+            # Streaming upload: the storage tools hand boto3 a file-like
+            # object so a large file is never fully buffered. FakeR2 must
+            # consume it the same way, or tests would pass while production
+            # silently buffered 500 MB.
+            Body = Body.read()
         self.store[Key] = Body
         self.puts.append({"Bucket": Bucket, "Key": Key,
-                          "Body": Body, "ContentType": ContentType})
+                          "Body": Body, "ContentType": ContentType,
+                          "Metadata": Metadata})
         return {}
+
+    def delete_object(self, Bucket=None, Key=None):
+        self.store.pop(Key, None)
+        return {}
+
+    def delete_objects(self, Bucket=None, Delete=None):
+        for obj in (Delete or {}).get("Objects", []):
+            self.store.pop(obj.get("Key"), None)
+        return {"Deleted": (Delete or {}).get("Objects", [])}
+
+    def head_object(self, Bucket=None, Key=None):
+        if Key not in self.store:
+            raise NoSuchKey(f"NoSuchKey: {Key}")
+        import datetime
+
+        ctype = "application/json"
+        for put in self.puts:
+            if put["Key"] == Key:
+                ctype = put.get("ContentType") or ctype
+        return {"ContentLength": len(self.store[Key]),
+                "ContentType": ctype,
+                "LastModified": datetime.datetime(2026, 1, 1)}
+
+    def generate_presigned_url(self, *a, **kw):
+        # FakeR2 does not sign; a stable marker is enough because the tools
+        # only hand the URL back to the caller.
+        params = kw.get("Params") or {}
+        return (f"https://fake.invalid/{params.get('Bucket')}"
+                f"/{params.get('Key')}?signed=1")
+
+    def list_objects_v2(self, Bucket=None, Prefix="", MaxKeys=1000,
+                       ContinuationToken=None):
+        """List stored keys under a prefix.
+
+        Needed by joyverse.data.list_topics and by the get_data miss path,
+        which enumerates a user's topics to build a helpful error.
+        """
+        import datetime
+
+        contents = [
+            {"Key": k, "Size": len(v),
+             "LastModified": datetime.datetime(2026, 1, 1)}
+            for k, v in self.store.items() if k.startswith(Prefix)
+        ]
+        contents.sort(key=lambda o: o["Key"])
+        # Real S3 pages at 1000 and sets IsTruncated; the usage scan loops on
+        # that, so FakeR2 has to reproduce it or the loop goes untested.
+        # Resume after the token, mirroring S3 semantics.
+        if ContinuationToken:
+            keys = [c["Key"] for c in contents]
+            start = keys.index(ContinuationToken) + 1 \
+                if ContinuationToken in keys else 0
+            contents = contents[start:]
+        page = contents[:MaxKeys]
+        truncated = len(contents) > MaxKeys
+        out = {"Contents": page, "KeyCount": len(page),
+               "IsTruncated": truncated}
+        if truncated:
+            out["NextContinuationToken"] = page[-1]["Key"]
+        return out
 
     def seed(self, key, content):
         """Pre-populate an object (str or bytes)."""
@@ -67,14 +142,66 @@ class FakeR2:
 
 
 @pytest.fixture
-def fake_r2(monkeypatch):
+def no_network_guard(monkeypatch):
+    """Make any test that reaches the real R2 bucket fail loudly.
+
+    This exists because a test once authenticated through the real
+    `run.server._auth_dependency` without requesting `fake_r2`. That silently
+    wrote a user into the production bucket -- about ninety of them, including
+    person0..person49 -- and they only became visible when the registry was
+    inspected by hand.
+
+    `joyverse.config.r2_client` is a proxy that calls `get_r2_client()` on every
+    call, so raising there blocks the real client for the whole session while
+    leaving the proxy (and therefore `fake_r2`) fully working.
+    """
+    def _refuse():
+        raise RuntimeError(
+            "A test tried to reach the real Cloudflare R2 bucket. "
+            "Request the `fake_r2` fixture so writes are captured in memory."
+        )
+
+    monkeypatch.setattr(jv_config, "get_r2_client", _refuse)
+    monkeypatch.setattr(jv_config, "_r2_client", None, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _isolate_r2_by_default(no_network_guard):
+    """Apply the guard to every test in the session.
+
+    Autouse, because the failure mode it prevents is silent: a test that
+    forgets `fake_r2` still passes, just against real storage.
+    """
+    return no_network_guard
+
+
+@pytest.fixture(autouse=True)
+def _clear_storage_cache():
+    """Drop the module-global usage cache between tests.
+
+    `_USAGE_CACHE` is keyed only by user_id and lives for the whole process, so
+    without this one test's stored bytes satisfy the next test's quota check.
+    A limit test that passes alone and fails in the suite is the signature of
+    exactly this leak.
+    """
+    from joyverse import storage
+    storage._USAGE_CACHE.clear()
+    yield
+    storage._USAGE_CACHE.clear()
+
+
+@pytest.fixture
+def fake_r2(monkeypatch, no_network_guard):
     """Patch the r2_client reference into every module that imported it.
 
     Each module did `from joyverse.config import r2_client`, so rebinding
     config's attribute alone would not update their local names.
     """
     fake = FakeR2()
-    modules = ["config", "profile", "bio", "memory", "data"]
+    # identity was added later; it imports r2_client too and must be patched
+    # or the registry would be read from and written to the real bucket.
+    modules = ["config", "profile", "bio", "memory", "data", "identity",
+               "storage", "uploads", "logs"]
     for name in modules:
         mod = __import__(f"joyverse.{name}", fromlist=["r2_client"])
         monkeypatch.setattr(mod, "r2_client", fake, raising=False)
@@ -84,12 +211,12 @@ def fake_r2(monkeypatch):
 
 @pytest.fixture
 def make_token():
-    """Build a signed JWT for arbitrary claims."""
+    """Build a signed bearer JWT for arbitrary claims."""
     import jwt as pyjwt
 
-    def _make(username="joydip", secret=None, exp_delta=3600, **extra):
+    def _make(handle="tester", secret=None, exp_delta=3600, **extra):
         import time
-        payload = {"username": username, "exp": int(time.time()) + exp_delta}
+        payload = {"handle": handle, "exp": int(time.time()) + exp_delta}
         payload.update(extra)
         return pyjwt.encode(payload, secret or TEST_SECRET, algorithm="HS256")
 
@@ -97,8 +224,9 @@ def make_token():
 
 
 @pytest.fixture
-def valid_token(make_token):
-    return make_token("joydip")
+def valid_token(make_token, fake_r2):
+    """A token whose handle resolves against the fake registry."""
+    return make_token("tester")
 
 
 @pytest.fixture

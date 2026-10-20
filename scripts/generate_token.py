@@ -13,9 +13,9 @@ Then give the printed token to your client as:
 # EDIT THESE FIELDS
 # ============================================================
 
-USERNAME = "joydip"              # -> becomes the R2 key "users/<USERNAME>/..."
-EXPIRES_IN_HOURS = 24 * 7         # 168 = 7 days. Use 1 for short-lived tokens.
-ALGORITHM = "HS256"               # must match the server in joyverse/auth.py
+HANDLE = "joydip"               # -> your user_id, e.g. u_8f3a91c7e4b2
+EXPIRES_IN_HOURS = 24 * 7        # 168 = 7 days. Use 1 for short-lived tokens.
+ALGORITHM = "HS256"              # must match the server in joyverse/auth.py
 
 # Leave the secret blank to read JWT_SECRET from your .env file.
 # Set it only if you deliberately want to override the .env value.
@@ -48,15 +48,21 @@ import jwt
 
 
 def main() -> int:
-    if not USERNAME.strip():
-        print("Error: USERNAME is empty. Edit the top of this script.", file=sys.stderr)
+    if not HANDLE.strip():
+        print("Error: HANDLE is empty. Edit the top of this script.", file=sys.stderr)
         return 1
 
-    # Mirror the server's traversal guard so bad usernames fail here, not in prod.
-    if "/" in USERNAME or ".." in USERNAME or USERNAME.strip() == "":
+    # The server validates this too; fail here first so a bad handle is caught
+    # at minting time rather than as a 401 on every later request.
+    from joyverse.identity import normalise_handle
+
+    try:
+        handle = normalise_handle(HANDLE)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
         print(
-            "Error: USERNAME contains '/' or '..'.\n"
-            "The server rejects these to prevent R2 key path traversal.",
+            "Handles are 3-32 characters: letters, digits, underscore, dot "
+            "and hyphen.",
             file=sys.stderr,
         )
         return 1
@@ -71,11 +77,25 @@ def main() -> int:
             return 1
         source = f"JWT_SECRET in {ENV_PATH.name}"
 
+    # Register (or look up) the handle so the token maps to a real account.
+    # This is the step that turns a name into a stable user_id: re-running
+    # this script with the same handle always returns the same id, so the
+    # data already written under it stays reachable.
+    try:
+        from joyverse import identity
+
+        user_id = identity.resolve_handle(handle)
+    except Exception as e:
+        print(f"Warning: could not register the handle in R2: {e}", file=sys.stderr)
+        print("The token is still valid, but it needs the registry to resolve.",
+              file=sys.stderr)
+        user_id = None
+
     now = int(time.time())
     expires_at = now + (EXPIRES_IN_HOURS * 3600)
 
     payload = {
-        "username": USERNAME,
+        "handle": handle,
         "iat": now,
         "exp": expires_at,
     }
@@ -85,8 +105,9 @@ def main() -> int:
     print("=" * 70)
     print("TOKEN GENERATED")
     print("=" * 70)
-    print(f"Username  : {USERNAME}")
-    print(f"R2 key    : users/{USERNAME}/profile.md")
+    print(f"Handle    : {handle}")
+    print(f"User ID   : {user_id or '(unregistered)'}")
+    print(f"R2 prefix : users/{user_id}/" if user_id else "")
     print(f"Expires   : {datetime.fromtimestamp(expires_at, timezone.utc)} UTC")
     print(f"          (in {EXPIRES_IN_HOURS} hours)")
     print(f"Secret    : {source}")

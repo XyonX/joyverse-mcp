@@ -5,8 +5,8 @@ import pytest
 from joyverse import memory as mem
 
 
-ALICE = {"username": "alice"}
-BOB = {"username": "bob"}
+ALICE = {"user_id": "u_0a1b2c3d4e5f"}
+BOB = {"user_id": "u_b0b123456789"}
 
 
 class TestGetMemory:
@@ -18,17 +18,17 @@ class TestGetMemory:
 
     def test_first_read_persists_the_default(self, fake_r2):
         mem.get_memory(ALICE)
-        assert "users/alice/memory.json" in fake_r2.store
+        assert "users/u_0a1b2c3d4e5f/memory.json" in fake_r2.store
 
     def test_returns_stored_memory(self, fake_r2):
-        fake_r2.seed("users/alice/memory.json", json.dumps(
+        fake_r2.seed("users/u_0a1b2c3d4e5f/memory.json", json.dumps(
             {"personality": ["curious"], "observed_patterns": [],
              "preferences": {}, "current_context": {}, "last_updated": "2026-01-01"}))
         assert json.loads(mem.get_memory(ALICE))["personality"] == ["curious"]
 
     def test_last_updated_is_stamped(self, fake_r2):
         mem.get_memory(ALICE)
-        saved = fake_r2.get_json("users/alice/memory.json")
+        saved = fake_r2.get_json("users/u_0a1b2c3d4e5f/memory.json")
         assert len(saved["last_updated"]) == 10  # YYYY-MM-DD
 
 
@@ -57,7 +57,7 @@ class TestAddMemoryTrait:
 
     def test_stored_as_pretty_json(self, fake_r2):
         mem.add_memory_trait("curious", ALICE)
-        raw = fake_r2.store["users/alice/memory.json"].decode()
+        raw = fake_r2.store["users/u_0a1b2c3d4e5f/memory.json"].decode()
         assert "\n" in raw  # indent=2
         assert fake_r2.puts[0]["ContentType"] == "application/json"
 

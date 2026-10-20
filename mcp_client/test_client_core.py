@@ -65,15 +65,20 @@ class TestHandshake:
     def test_initialize_carries_instructions(self, client):
         assert client.initialize().get("instructions")
 
-    def test_lists_nine_tools(self, client):
-        assert len(client.list_tools()) == 9
+    def test_lists_every_tool(self, client):
+        # Compared against the expected set rather than a bare count, so adding
+        # or removing a tool gives a readable diff instead of "22 != 21".
+        assert len(client.list_tools()) == 22
 
     def test_tool_names_match_the_server(self, client):
         names = {t["name"] for t in client.list_tools()}
         assert names == {
             "get_profile", "update_profile", "get_bio", "update_bio",
             "get_memory", "add_memory_trait", "update_focus",
-            "get_data", "update_data"}
+            "get_data", "list_topics", "edit_data", "replace_data",
+            "register_client", "list_clients", "save_file_from_url",
+            "save_file_text", "get_file", "list_files", "delete_file",
+            "save_file_base64", "add_to_log", "get_log", "list_log_days"}
 
     def test_bad_token_is_rejected(self, app):
         bad = mc.MCPClient(app, "not-a-jwt")
@@ -127,11 +132,27 @@ class TestToolSchemaConversion:
             props = t["function"]["parameters"].get("properties", {})
             assert "user" not in props
 
-    def test_update_data_schema_expects_a_string(self, client):
+    def test_replace_data_schema_expects_a_string(self, client):
+        # The whole-log writer still takes JSON as a STRING. This is the
+        # mistake an agent most often makes, so the type stays pinned.
         tools = {t["function"]["name"]: t for t in
                  mc.to_openai_tools(client.list_tools())}
-        data_prop = tools["update_data"]["function"]["parameters"]["properties"]["data"]
+        data_prop = tools["replace_data"]["function"]["parameters"]["properties"]["data"]
         assert data_prop["type"] == "string"
+
+    def test_edit_data_schema_exposes_its_operations(self, client):
+        tools = {t["function"]["name"]: t for t in
+                 mc.to_openai_tools(client.list_tools())}
+        props = tools["edit_data"]["function"]["parameters"]["properties"]
+        for arg in ("topic", "op", "value", "path", "match"):
+            assert arg in props, f"edit_data is missing {arg}"
+
+    def test_the_dangerous_tool_is_named_replace_not_update(self, client):
+        # Naming is a safety feature: an agent reading "update_data" would
+        # reasonably assume it sends a patch.
+        names = {t["name"] for t in client.list_tools()}
+        assert "replace_data" in names
+        assert "update_data" not in names
 
 
 class TestToolCallLoop:
@@ -207,8 +228,9 @@ class TestToolCallLoop:
 
     def test_tools_are_passed_to_the_llm(self, client):
         llm, calls = self._stub(["done"])
-        mc.run_conversation(client, llm, client.list_tools(), self._turn(client))
-        assert len(calls[0]["tools"]) == 9
+        tools = client.list_tools()
+        mc.run_conversation(client, llm, tools, self._turn(client))
+        assert len(calls[0]["tools"]) == len(tools)
 
     def test_malformed_arguments_do_not_crash(self, client):
         bad = types.SimpleNamespace(name="get_profile", arguments="{not json")
@@ -229,5 +251,18 @@ class TestPersonaAndIsolation:
         assert mc.TEST_USERNAME == "aarav-test"
 
     def test_client_never_touches_another_user(self, client, fake_r2):
+        # Storage is keyed by the resolved user_id, not by the handle, so the
+        # assertion asks the registry where this persona actually writes
+        # instead of assuming a path.
+        #
+        # The identity registry itself is server infrastructure and lives under
+        # the same users/ prefix, so it is excluded: what matters is that no
+        # key belongs to anybody other than this persona.
+        from joyverse import identity
+
         client.call_tool("update_bio", {"section": "S", "content": "mine"})
-        assert all(k.startswith("users/aarav-test/") for k in fake_r2.store)
+        prefix = f"users/{identity.resolve_handle(mc.TEST_USERNAME)}/"
+        data_keys = [k for k in fake_r2.store if not k.startswith("users/_registry/")]
+
+        assert data_keys, "the client wrote nothing to assert on"
+        assert all(k.startswith(prefix) for k in data_keys)

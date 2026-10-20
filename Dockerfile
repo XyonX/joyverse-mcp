@@ -8,8 +8,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     gcc \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy pyproject.toml and install dependencies
-COPY pyproject.toml .
+# Copy source code and pyproject.toml
+COPY . .
+
+# Install package and dependencies
 RUN pip install --no-cache-dir --prefix=/install .
 
 # Production stage
