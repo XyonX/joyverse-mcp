@@ -206,10 +206,12 @@ def _walk(container, path):
     `path` accepts a dotted string ("items.rules") OR a list of segments
     (["items", "rules"]) — the inputSchema advertises an array, so the
     advertised form must work, not 500 with "'['items']' is not a list".
-    Only a whole path of None/""/[] addresses the document root; malformed
-    input (empty segments, "." , segments inside a non-object) raises
-    ValueError so the caller returns a clean error instead of silently
-    retargeting the write or crashing.
+    Only a whole path of None/""/[] addresses the document root; any other
+    falsy value (0, False, 0.0, (), "") that is not an accepted root form
+    is rejected rather than bypassing validation — and malformed input
+    (empty segments, "." , segments inside a non-object) raises ValueError
+    so the caller returns a clean error instead of silently retargeting
+    the write or crashing.
     """
     if path is None or path == "" or path == []:
         return container, None
@@ -220,6 +222,13 @@ def _walk(container, path):
                 f"path {path!r} contains an empty segment; expected dotted "
                 "keys like 'items.rules'.")
     elif isinstance(path, (list, tuple)):
+        if not path:
+            # () is a plausible "root" reading, but tuples are not part of
+            # the advertised contract (schema says array) — reject so the
+            # caller surfaces a clean error instead of parts[-1] IndexError.
+            raise ValueError(
+                "path must be a dotted string or a non-empty list; an "
+                f"empty {type(path).__name__} is not a valid path.")
         parts = []
         for seg in path:
             if seg is None or seg == "":
@@ -408,13 +417,18 @@ def edit_data(topic: str, op: str, value: Any = None,
 
 
     try:
-        # _walk validates the path (malformed segments raise ValueError);
-        # it must sit INSIDE this try so the client gets a JSON error
-        # instead of an uncaught exception (PR #5 review P2).
-        parent, last = _walk(doc, path) if path else (doc, None)
+        # _walk validates the path AND decides what counts as the root
+        # (None/""/[]); the call must be unconditional so falsy-but-invalid
+        # values (0, False, (), 0.0) reach validation instead of silently
+        # bypassing it as a root-level write (PR #5 review round 2).
+        parent, last = _walk(doc, path)
 
         if op == "set":
             if match:
+                if last is None:
+                    return json.dumps({"error":
+                        "`match` needs a path; with no path there is no "
+                        "list to search."})
                 # Inside a named item of an array.
                 if not isinstance(parent.get(last), list):
                     return json.dumps({"error":
@@ -430,7 +444,7 @@ def edit_data(topic: str, op: str, value: Any = None,
                 item = dict(items[idx])
                 item.update(value or {})
                 items[idx] = item
-            elif path:
+            elif last is not None:
                 target = parent.setdefault(last, {})
                 if isinstance(target, dict) and isinstance(value, dict):
                     _merge(target, value)
@@ -471,6 +485,12 @@ def edit_data(topic: str, op: str, value: Any = None,
             #   without match -> append `value` to the list at `path`
             #   with match    -> append inside the matched item, where
             #                   value is {"list_name": [items]}
+            if last is None:
+                # Root has no list to append to; without this guard the
+                # fallback below would create a literal None key in the
+                # document ("null" in JSON) and return ok:true.
+                return json.dumps({"error":
+                    "op=append needs a path naming the list to append to."})
             items = parent.get(last)
             if match:
                 if not isinstance(items, list):

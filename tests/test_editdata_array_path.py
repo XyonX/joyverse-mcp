@@ -104,6 +104,13 @@ class TestWalkRejectsMalformedPaths:
             with pytest.raises(ValueError):
                 _walk(doc, bad)
 
+    def test_empty_tuple_rejected_not_indexerror(self, doc):
+        # review round 2: () is falsy so the old caller guard skipped _walk,
+        # and reaching _walk directly hit parts[-1] IndexError because ()
+        # is neither None/""/[] nor a non-empty sequence.
+        with pytest.raises(ValueError):
+            _walk(doc, ())
+
     def test_numeric_segments_are_stringified_not_rejected(self, doc):
         # numbers are valid segments (stringified to dict keys); only
         # None/"" are invalid
@@ -217,3 +224,63 @@ class TestEditDataThroughArrayPath:
         res = json.loads(out)
         assert res.get("ok") is None
         assert isinstance(res.get("error"), str)
+
+    def test_falsy_invalid_types_reach_validation_not_root_edit(self, stored):
+        """Review round 2, finding 1: `if path else (doc, None)` in the
+        caller meant path=0/False/() bypassed _walk entirely and were
+        treated as root-level edits with ok:true. Falsy-but-invalid must
+        reach _walk's validation and be rejected."""
+        seed = json.loads(stored.raw.decode())
+        for bad in (0, False, (), 0.0):
+            stored.raw = json.dumps(seed).encode()
+            out = edit_data(topic="t", op="set", value={"injected": True},
+                            path=bad, user={"user_id": UID})
+            res = json.loads(out)
+            assert res.get("ok") is None, f"path={bad!r} returned ok:true"
+            assert isinstance(res.get("error"), str), \
+                f"path={bad!r} did not produce an error"
+            # load-bearing: the write must NOT have happened at all
+            assert "injected" not in json.loads(stored.raw.decode()), \
+                f"path={bad!r} silently performed a root-level edit"
+
+    def test_root_forms_still_merge_at_root(self, stored):
+        """The intended root forms (None, omitted, [], "") keep working —
+        validation tightening must not break the legitimate contract."""
+        seed = {"purpose": "test", "items": [{"id": "a", "on": True}]}
+        for root in (None, [], ""):
+            stored.raw = json.dumps(seed).encode()
+            out = edit_data(topic="t", op="set", value={"purpose": "ok"},
+                            path=root, user={"user_id": UID})
+            assert json.loads(out).get("ok") is True, f"path={root!r}"
+            saved = json.loads(stored.raw.decode())
+            assert saved["purpose"] == "ok"
+            assert len(saved["items"]) == 1  # nothing dropped
+
+    def test_match_without_path_is_a_clean_error(self, stored):
+        """Root + match previously produced "'None' is not a list"; now it
+        is an explicit 'match needs a path' error, still no write."""
+        seed = json.loads(stored.raw.decode())
+        stored.raw = json.dumps(seed).encode()
+        out = edit_data(topic="t", op="set", value={"on": False},
+                        match={"id": "a"}, user={"user_id": UID})
+        res = json.loads(out)
+        assert res.get("ok") is None
+        assert "path" in res["error"]
+        assert json.loads(stored.raw.decode()) == seed, \
+            "document changed on a rejected call"
+
+    def test_append_without_path_needs_a_path_error_not_null_key(self, stored):
+        """Root + append previously created a literal None key ("null" in
+        JSON) and returned ok:true — silent corruption. Now a clean error
+        and the stored document untouched."""
+        seed = json.loads(stored.raw.decode())
+        stored.raw = json.dumps(seed).encode()
+        out = edit_data(topic="t", op="append", value=["x"],
+                        user={"user_id": UID})
+        res = json.loads(out)
+        assert res.get("ok") is None
+        assert "path" in res["error"]
+        saved = json.loads(stored.raw.decode())
+        assert "null" not in {k if isinstance(k, str) else "null"
+                              for k in saved}, "a None key was written"
+        assert saved == seed, "document changed on a rejected call"
