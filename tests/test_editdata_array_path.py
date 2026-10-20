@@ -1,4 +1,5 @@
-"""Regression for r-joyverse-editdata-schema-bug (reported by Tony, Oct 2026).
+"""Regression for r-joyverse-editdata-schema-bug (reported by Tony, Oct 2026)
++ PR #5 review findings (segment validation, malformed dotted paths).
 
 edit_data's inputSchema advertises `path` as an ARRAY (Optional[list]), but
 _walk() did str(path).split('.') — a client following the advertised schema
@@ -10,13 +11,19 @@ Contract proven here:
   1. array path behaves identically to the equivalent dotted-string path
   2. dotted string still works (Tony's in-the-wild workaround keeps working)
   3. match-based set/add/remove ops work through an array path
-  4. None/empty path still addresses the document root
+  4. None/""/[] addresses the document root — the ONLY root forms
+  5. malformed paths are REJECTED with ValueError, never silently retargeted:
+     segments None/"" (list form), "." / "a..b" (dotted form), and paths that
+     end inside a non-object all raise; edit_data surfaces them as clean
+     JSON errors instead of crashing or writing to the wrong node.
 """
 import json
 
 import pytest
 
 from joyverse.data import _walk, edit_data
+
+UID = "u_a1b2c3d4e5f6"
 
 
 @pytest.fixture
@@ -25,7 +32,7 @@ def doc():
         "purpose": "test doc",
         "items": [
             {"id": "a", "name": "Alpha", "on": True},
-            {"id": "b", "name": "Beta", "on": False},
+            {"id": "b", "name": "Beta", "on": True},
         ],
     }
 
@@ -43,6 +50,14 @@ class TestWalkAcceptsArrayPath:
         assert last == "items"
         assert isinstance(parent.get(last), list)
         assert parent[last][0]["id"] == "a"
+
+    def test_nested_array_path_preserved(self, doc):
+        d1 = {"a": {"b": {"c": 1}}}
+        parent, last = _walk(d1, ["a", "b"])
+        # _walk returns the PARENT container and the final key
+        assert parent == {"b": {"c": 1}}
+        assert last == "b"
+        assert parent[last] == {"c": 1}
 
     def test_none_and_empty_paths_are_the_root(self, doc):
         assert _walk(doc, None) == (doc, None)
@@ -64,6 +79,50 @@ class TestWalkAcceptsArrayPath:
     def test_non_object_traversal_raises(self, doc):
         with pytest.raises(ValueError):
             _walk(doc, "items.0.on")  # array element is not a dict traversal
+
+
+class TestWalkRejectsMalformedPaths:
+    """PR #5 review P1+P2: invalid input must raise, never silently
+    drop segments (which would retarget the write) or crash with IndexError."""
+
+    def test_none_segment_in_list_rejected(self, doc):
+        with pytest.raises(ValueError):
+            _walk(doc, ["items", None])
+
+    def test_empty_string_segment_in_list_rejected(self, doc):
+        with pytest.raises(ValueError):
+            _walk(doc, ["items", ""])
+
+    def test_dot_only_rejected_not_indexerror(self, doc):
+        # pre-fix: "." -> parts=[] -> parts[-1] raised IndexError, which
+        # edit_data does not catch (it only catches ValueError)
+        with pytest.raises(ValueError):
+            _walk(doc, ".")
+
+    def test_dotted_empty_segment_rejected(self, doc):
+        for bad in ("items.", ".items", "a..b", ".."):
+            with pytest.raises(ValueError):
+                _walk(doc, bad)
+
+    def test_numeric_segments_are_stringified_not_rejected(self, doc):
+        # numbers are valid segments (stringified to dict keys); only
+        # None/"" are invalid
+        d1 = {"layers": {"3": {"n": 1}}}
+        parent, last = _walk(d1, ["layers", 3])
+        assert parent == {"3": {"n": 1}}
+        assert last == "3"          # stringified, not rejected
+        assert parent[last] == {"n": 1}
+        # dotted-string equivalent resolves identically
+        assert _walk(d1, "layers.3") == (parent, "3")
+
+    def test_path_ending_inside_a_list_rejected(self, doc):
+        # ["items","rules"] where items is a LIST: the final parent is the
+        # list, not a dict — pre-fix this raised AttributeError on .get();
+        # the contract is a clear ValueError.
+        with pytest.raises(ValueError):
+            _walk(doc, ["items", "rules"])
+        with pytest.raises(ValueError):
+            _walk(doc, "items.rules")
 
 
 class TestEditDataThroughArrayPath:
@@ -100,41 +159,61 @@ class TestEditDataThroughArrayPath:
     def test_set_with_match_via_array_path(self, stored):
         out = edit_data(topic="t", op="set", value={"on": False},
                         path=["items"], match={"id": "a"},
-                        user={"user_id": "u_a1b2c3d4e5f6"})
+                        user={"user_id": UID})
         res = json.loads(out)
         assert res.get("ok") is True
         saved_doc = json.loads(stored.raw.decode())
         assert saved_doc["items"][0]["on"] is False
-        # sibling untouched — the whole bug class was "wrong item edited"
-        assert saved_doc["items"][1]["on"] is False
+        # sibling untouched — both started True (review: start the sibling
+        # True so "still True" is a real assertion, not a tautology)
+        assert saved_doc["items"][1]["on"] is True
 
     def test_dotted_string_still_works(self, stored):
         # Tony's in-the-wild workaround must not regress
-        out = edit_data(topic="t", op="set", value={"on": True},
+        out = edit_data(topic="t", op="set", value={"on": False},
                         path="items", match={"id": "b"},
-                        user={"user_id": "u_a1b2c3d4e5f6"})
+                        user={"user_id": UID})
         assert json.loads(out).get("ok") is True
         saved_doc = json.loads(stored.raw.decode())
-        assert saved_doc["items"][1]["on"] is True
+        assert saved_doc["items"][1]["on"] is False
+        assert saved_doc["items"][0]["on"] is True  # sibling untouched
 
     def test_add_via_array_path(self, stored):
         out = edit_data(topic="t", op="add", value={"id": "c", "name": "Gamma"},
-                        path=["items"], user={"user_id": "u_a1b2c3d4e5f6"})
+                        path=["items"], user={"user_id": UID})
         assert json.loads(out).get("ok") is True
         saved_doc = json.loads(stored.raw.decode())
         assert [i["id"] for i in saved_doc["items"]] == ["a", "b", "c"]
 
     def test_remove_via_array_path(self, stored):
         out = edit_data(topic="t", op="remove", match={"id": "a"},
-                        path=["items"], user={"user_id": "u_a1b2c3d4e5f6"})
+                        path=["items"], user={"user_id": UID})
         assert json.loads(out).get("ok") is True
         saved_doc = json.loads(stored.raw.decode())
         assert [i["id"] for i in saved_doc["items"]] == ["b"]
 
     def test_root_merge_without_path(self, stored):
         out = edit_data(topic="t", op="set", value={"purpose": "changed"},
-                        user={"user_id": "u_a1b2c3d4e5f6"})
+                        user={"user_id": UID})
         assert json.loads(out).get("ok") is True
         saved_doc = json.loads(stored.raw.decode())
         assert saved_doc["purpose"] == "changed"
         assert len(saved_doc["items"]) == 2  # nothing dropped
+
+    def test_malformed_path_returns_json_error_not_crash(self, stored):
+        # edit_data must surface _walk's ValueError as a JSON error object —
+        # never an IndexError/AttributeError leaking a 500 to the client
+        out = edit_data(topic="t", op="set", value={"on": False},
+                        path=["items", None], match={"id": "a"},
+                        user={"user_id": UID})
+        res = json.loads(out)
+        assert res.get("ok") is None
+        assert isinstance(res.get("error"), str)
+        assert "segment" in res["error"].lower() or "path" in res["error"].lower()
+
+    def test_dot_path_returns_json_error_not_crash(self, stored):
+        out = edit_data(topic="t", op="set", value={"purpose": "x"},
+                        path=".", user={"user_id": UID})
+        res = json.loads(out)
+        assert res.get("ok") is None
+        assert isinstance(res.get("error"), str)

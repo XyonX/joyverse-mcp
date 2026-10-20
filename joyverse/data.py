@@ -206,24 +206,39 @@ def _walk(container, path):
     `path` accepts a dotted string ("items.rules") OR a list of segments
     (["items", "rules"]) — the inputSchema advertises an array, so the
     advertised form must work, not 500 with "'['items']' is not a list".
-    Empty/None paths resolve to the container root.
+    Only a whole path of None/""/[] addresses the document root; malformed
+    input (empty segments, "." , segments inside a non-object) raises
+    ValueError so the caller returns a clean error instead of silently
+    retargeting the write or crashing.
     """
     if path is None or path == "" or path == []:
         return container, None
     if isinstance(path, str):
-        parts = [p for p in path.split(".") if p]
+        parts = path.split(".")
+        if any(not p for p in parts):
+            raise ValueError(
+                f"path {path!r} contains an empty segment; expected dotted "
+                "keys like 'items.rules'.")
     elif isinstance(path, (list, tuple)):
-        # stringify defensively: clients may send numbers/None segments
-        parts = [str(p) for p in path if p not in (None, "")]
-        if not parts:
-            return container, None
+        parts = []
+        for seg in path:
+            if seg is None or seg == "":
+                raise ValueError(
+                    f"invalid path segment {seg!r} in {list(path)!r}; "
+                    "segments must be non-empty.")
+            parts.append(str(seg))
     else:
-        raise ValueError(f"path must be a dotted string or a list, got {type(path).__name__}.")
+        raise ValueError(
+            f"path must be a dotted string or a list, got {type(path).__name__}.")
     node = container
     for part in parts[:-1]:
         if not isinstance(node, dict):
             raise ValueError(f"Path '{path}' goes through a non-object.")
         node = node.setdefault(part, {})
+    if not isinstance(node, dict):
+        raise ValueError(
+            f"Path '{path}' ends at a non-object; a key cannot be addressed "
+            "inside a list — use `match` on the list's path instead.")
     return node, parts[-1]
 
 
@@ -342,6 +357,11 @@ def _coerce_structured(value):
 
 
 def edit_data(topic: str, op: str, value: Any = None,
+              # NOTE: hint stays Optional[list] so the advertised inputSchema
+              # remains `array` (schema stability for clients). The dotted-
+              # string form is accepted at runtime for legacy clients — see
+              # _walk — but changing this hint to a Union would flip the
+              # advertised type via _unwrap_optional's multi-union fallback.
               path: Optional[list] = None,
               match: Optional[Dict[str, Any]] = None,
               user: dict = None) -> str:
@@ -387,9 +407,12 @@ def edit_data(topic: str, op: str, value: Any = None,
     match = match or {}
 
 
-    parent, last = _walk(doc, path) if path else (doc, None)
-
     try:
+        # _walk validates the path (malformed segments raise ValueError);
+        # it must sit INSIDE this try so the client gets a JSON error
+        # instead of an uncaught exception (PR #5 review P2).
+        parent, last = _walk(doc, path) if path else (doc, None)
+
         if op == "set":
             if match:
                 # Inside a named item of an array.
