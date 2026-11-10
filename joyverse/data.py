@@ -3,7 +3,7 @@ import json
 from typing import Any, Dict, List, Optional
 
 from joyverse.atomic import (
-    Conflict, get_versioned, put_versioned, retry_on_conflict,
+    Conflict, get_versioned, is_not_found, put_versioned, retry_on_conflict,
 )
 from joyverse.config import (
     r2_client, BUCKET_NAME, get_data_key, ensure_doc_size,
@@ -26,6 +26,20 @@ def _topic_from_key(key: str, prefix: str) -> str:
     """
     rest = key[len(prefix):]
     return rest.split("/", 1)[0] if "/" in rest else ""
+
+
+def _is_internal(key: str) -> bool:
+    """True for bookkeeping objects such as the `.previous.json` snapshot.
+
+    They sit in the topic's folder and sort BEFORE the live file, so a listing
+    that took "the first object in the folder" described every topic from its
+    stale snapshot once it had been overwritten.
+    """
+    return key.rsplit("/", 1)[-1].startswith(".")
+
+
+def _previous_key(user_id: str, topic: str) -> str:
+    return f"users/{user_id}/data/{topic}/.previous.json"
 
 
 def _describe(raw: str) -> str:
@@ -65,6 +79,8 @@ def list_topics(user: dict) -> str:
 
     entries: Dict[str, dict] = {}
     for obj in listing.get("Contents", []):
+        if _is_internal(obj.get("Key", "")):
+            continue
         topic = _topic_from_key(obj.get("Key", ""), prefix)
         if not topic:
             continue
@@ -103,7 +119,8 @@ def _topic_names(user_id: str) -> List[str]:
         return []
     prefix = _data_prefix(user_id)
     names = {_topic_from_key(o.get("Key", ""), prefix)
-             for o in listing.get("Contents", [])}
+             for o in listing.get("Contents", [])
+             if not _is_internal(o.get("Key", ""))}
     return sorted(t for t in names if t)
 
 
@@ -173,7 +190,7 @@ def _load_topic(user_id: str, topic: str):
         body = r2_client.get_object(Bucket=BUCKET_NAME, Key=key)
         return json.loads(body["Body"].read().decode("utf-8"))
     except Exception as e:
-        if "NoSuchKey" in str(e):
+        if is_not_found(e):
             return None
         raise
 
@@ -199,7 +216,7 @@ def _snapshot(user_id: str, topic: str, raw: bytes):
     surfaces it, and it cannot collide with a real topic.
     """
     try:
-        key = f"users/{user_id}/data/{topic}/.previous.json"
+        key = _previous_key(user_id, topic)
         r2_client.put_object(Bucket=BUCKET_NAME, Key=key, Body=raw,
                              ContentType="application/json")
     except Exception:
@@ -305,7 +322,7 @@ def get_data(topic: str, user: dict) -> str:
         response = r2_client.get_object(Bucket=BUCKET_NAME, Key=key)
         return response["Body"].read().decode("utf-8")
     except Exception as e:
-        if "NoSuchKey" in str(e):
+        if is_not_found(e):
             return _miss(user_id, topic)
         return json.dumps({"error": f"R2 error: {str(e)}"})
 
@@ -424,7 +441,34 @@ def edit_data(topic: str, op: str, value: Any = None,
     except Exception as e:
         return json.dumps({"error": f"R2 error: {e}"})
 
-    doc = json.loads(raw.decode("utf-8")) if raw else {}
+    if raw is None:
+        # A new topic is fine; a misspelling of an existing one is not. It
+        # used to be created silently, forking the user's data into "dsa" and
+        # "dsaa" with nothing to say it had happened.
+        near = _suggest(topic, _topic_names(user_id))
+        if near:
+            return json.dumps({
+                "error": f"No topic named '{topic}'.",
+                "did_you_mean": near,
+                "hint": "Use the exact existing name. If you really mean to "
+                        "start a new topic, create it with replace_data.",
+            })
+
+    try:
+        doc = json.loads(raw.decode("utf-8")) if raw else {}
+    except ValueError:
+        return json.dumps({
+            "error": f"The '{topic}' log is not valid JSON and cannot be "
+                     "edited in place.",
+            "hint": "Rewrite it with replace_data, or restore the previous "
+                    "version with restore_data.",
+        })
+    if not isinstance(doc, dict):
+        return json.dumps({
+            "error": f"The '{topic}' log is a {type(doc).__name__}, not an "
+                     "object, so there are no fields to address.",
+            "hint": "Rewrite it as an object with replace_data.",
+        })
     match = match or {}
 
 
@@ -453,6 +497,11 @@ def edit_data(topic: str, op: str, value: Any = None,
                         "available": [i.get("name") for i in items
                                       if isinstance(i, dict)],
                     })
+                if value is not None and not isinstance(value, dict):
+                    return json.dumps({
+                        "error": "With `match`, value must be an object of "
+                                 "the fields to change on the matched item.",
+                        "got": type(value).__name__})
                 item = dict(items[idx])
                 item.update(value or {})
                 items[idx] = item
@@ -488,6 +537,8 @@ def edit_data(topic: str, op: str, value: Any = None,
                                   if isinstance(i, dict)],
                 })
             removed = items.pop(idx)
+            if raw is not None:
+                _snapshot(user_id, topic, raw)
             _save_topic(user_id, topic, doc, version)
             return json.dumps({"ok": True, "op": "remove",
                                "removed": removed})
@@ -544,11 +595,56 @@ def edit_data(topic: str, op: str, value: Any = None,
     except ValueError as e:
         return json.dumps({"error": str(e)})
 
+    # Keep the version being replaced, so one bad edit can be undone with
+    # restore_data. Only replace_data used to do this.
+    if raw is not None:
+        _snapshot(user_id, topic, raw)
     try:
         _save_topic(user_id, topic, doc, version)
     except ValueError as e:
         return json.dumps({"error": str(e)})
     return json.dumps({"ok": True, "op": op, "topic": topic})
+
+
+@retry_on_conflict
+def restore_data(topic: str, user: dict = None) -> str:
+    """Undo the last write to a data log.
+
+    Every edit_data and replace_data keeps the version it replaced. This
+    swaps that version back in -- and keeps the one it displaced, so calling
+    restore_data a second time redoes the change. One level of undo only.
+    """
+    user_id = user["user_id"]
+    try:
+        key = get_data_key(user_id, topic)
+    except ValueError as e:
+        return json.dumps({"error": f"Invalid topic: {e}"})
+
+    try:
+        previous, _ = get_versioned(r2_client, BUCKET_NAME,
+                                    _previous_key(user_id, topic))
+        current, version = get_versioned(r2_client, BUCKET_NAME, key)
+    except Exception as e:
+        return json.dumps({"error": f"R2 error: {e}"})
+
+    if previous is None:
+        if current is None:
+            return _miss(user_id, topic)
+        return json.dumps({
+            "error": f"There is no earlier version of '{topic}' to restore.",
+            "hint": "A previous version exists only after the log has been "
+                    "changed at least once.",
+        })
+
+    put_versioned(r2_client, BUCKET_NAME, key, previous, version,
+                  ContentType="application/json")
+    if current is not None:
+        _snapshot(user_id, topic, current)
+    return json.dumps({
+        "ok": True, "topic": topic,
+        "restored": "the version before the last write",
+        "hint": "Call restore_data again to redo the change you just undid.",
+    })
 
 
 @retry_on_conflict

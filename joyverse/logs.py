@@ -12,7 +12,9 @@ import json
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
-from joyverse.atomic import get_versioned, put_versioned, retry_on_conflict
+from joyverse.atomic import (
+    get_versioned, is_not_found, put_versioned, retry_on_conflict,
+)
 from joyverse.config import BUCKET_NAME, get_log_key
 
 # Default window when the caller names no date at all: the last 24 hours.
@@ -24,6 +26,9 @@ DEFAULT_LIMIT = 20
 # Guards a caller from asking for a window that spans more days than we care
 # to scan. Reads are capped rather than unbounded.
 MAX_DAYS_SCANNED = 400
+
+# Windows longer than this list the days that exist before reading any.
+LIST_BEFORE_READING_DAYS = 3
 
 
 class LogError(Exception):
@@ -99,7 +104,7 @@ def _read_day(user_id: str, day: str) -> List[dict]:
         body = r2_client.get_object(Bucket=BUCKET_NAME,
                                     Key=get_log_key(user_id, day))
     except Exception as e:
-        if "NoSuchKey" in str(e) or "does not exist" in str(e):
+        if is_not_found(e):
             return []
         raise
 
@@ -244,6 +249,11 @@ def _resolve_window(date, since, until):
     if since or until:
         start = parse_when(since, "since") if since else None
         end = parse_when(until, "until", end_of_day=True) if until else None
+        if end and not start:
+            # `until` alone means "the day or so leading up to then". The
+            # window used to be reported as open-ended while only the last
+            # 24 hours were actually read.
+            start = end - timedelta(hours=DEFAULT_WINDOW_HOURS)
         if start and end and end < start:
             raise LogError({
                 "error": "until is before since.",
@@ -300,8 +310,17 @@ def get_log(date: str = None, since: str = None, until: str = None,
             wanted.append(_day_str(cursor))
             cursor += timedelta(days=1)
 
+        # A long range is mostly days with nothing logged. Reading each one
+        # is a request apiece, so find out which days exist first and read
+        # only those. Short windows skip the listing -- it would cost more
+        # than the reads it saves.
+        to_read = wanted
+        if len(wanted) > LIST_BEFORE_READING_DAYS:
+            existing = _logged_days(user_id)
+            to_read = [day for day in wanted if day in existing]
+
         entries = []
-        for day in wanted:
+        for day in to_read:
             for entry in _read_day(user_id, day):
                 if tags:
                     have = {str(t).lower() for t in entry.get("tags", [])}
@@ -327,7 +346,7 @@ def get_log(date: str = None, since: str = None, until: str = None,
             "order": order,
             "window_start": _iso(start) if start else None,
             "window_end": _iso(end) if end else None,
-            "days_read": wanted,
+            "days_read": to_read,
         }, indent=2)
     except LogError as e:
         return json.dumps(e.payload)
@@ -335,6 +354,27 @@ def get_log(date: str = None, since: str = None, until: str = None,
         return json.dumps({"error": f"Invalid argument: {e}"})
     except Exception as e:
         return json.dumps({"error": f"Could not read log: {e}"})
+
+
+def _logged_days(user_id: str) -> set:
+    """Every date that has a log object, from one paginated listing."""
+    from joyverse.config import r2_client
+
+    prefix = f"users/{user_id}/logs/"
+    days, token = set(), None
+    while True:
+        kwargs = {"Bucket": BUCKET_NAME, "Prefix": prefix}
+        if token:
+            kwargs["ContinuationToken"] = token
+        page = r2_client.list_objects_v2(**kwargs)
+        for obj in page.get("Contents", []):
+            name = obj["Key"].split("/")[-1]
+            if name.endswith(".jsonl"):
+                days.add(name[:-len(".jsonl")])
+        token = page.get("NextContinuationToken")
+        if not page.get("IsTruncated") or not token:
+            break
+    return days
 
 
 def _within(entries: List[dict], start, end) -> List[dict]:
@@ -365,7 +405,7 @@ def list_log_days(limit: int = 30, include_counts: bool = False,
 
     user_id = user["user_id"]
     try:
-        limit = min(int(limit) if limit else 30, 400)
+        limit = max(1, min(int(limit) if limit else 30, 400))
         prefix = f"users/{user_id}/logs/"
 
         days, token = [], None

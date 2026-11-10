@@ -68,13 +68,15 @@ class TestHandshake:
     def test_lists_every_tool(self, client):
         # Compared against the expected set rather than a bare count, so adding
         # or removing a tool gives a readable diff instead of "22 != 21".
-        assert len(client.list_tools()) == 22
+        assert len(client.list_tools()) == 26
 
     def test_tool_names_match_the_server(self, client):
         names = {t["name"] for t in client.list_tools()}
         assert names == {
             "get_profile", "update_profile", "get_bio", "update_bio",
             "get_memory", "add_memory_trait", "update_focus",
+            "add_observed_pattern", "update_preference", "update_context",
+            "restore_data",
             "get_data", "list_topics", "edit_data", "replace_data",
             "register_client", "list_clients", "save_file_from_url",
             "save_file_text", "get_file", "list_files", "delete_file",

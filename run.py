@@ -7,8 +7,13 @@ from joyverse.config import (
 from joyverse import config as jv_config
 from joyverse.profile import get_profile, update_profile
 from joyverse.bio import get_bio, update_bio
-from joyverse.memory import get_memory, add_memory_trait, update_focus
-from joyverse.data import get_data, list_topics, edit_data, replace_data
+from joyverse.memory import (
+    get_memory, add_memory_trait, update_focus, add_observed_pattern,
+    update_preference, update_context,
+)
+from joyverse.data import (
+    get_data, list_topics, edit_data, replace_data, restore_data,
+)
 from joyverse.storage import (
     register_client, list_clients, save_file_from_url, save_file_text,
     get_file, list_files, delete_file,
@@ -96,6 +101,19 @@ server.tool(description="Add a personality trait to memory",
             scopes=[WRITE_SCOPE])(add_memory_trait)
 server.tool(description="Update the current main focus",
             scopes=[WRITE_SCOPE])(update_focus)
+server.tool(description=(
+    "Record a recurring behaviour you have noticed across conversations, "
+    "e.g. 'asks for the reasoning before the answer'. Distinct from a "
+    "personality trait: a pattern is something they DO."),
+    scopes=[WRITE_SCOPE])(add_observed_pattern)
+server.tool(description=(
+    "Record how the user likes things delivered. name is one of "
+    "explanation_style, code_style, feedback_style."),
+    scopes=[WRITE_SCOPE])(update_preference)
+server.tool(description=(
+    "Update the user's current context. field is one of main_focus, "
+    "immediate_next (the next concrete step), mood."),
+    scopes=[WRITE_SCOPE])(update_context)
 
 # Data Logs
 server.tool(description="Get structured data logs by topic (e.g., dsa, projects)",
@@ -127,6 +145,12 @@ server.tool(description=(
     "edit_data instead. Refuses the write if it would drop existing keys "
     "unless you pass allow_drop."),
     scopes=[WRITE_SCOPE])(replace_data)
+
+server.tool(description=(
+    "Undo the last write to a data log by bringing back the version it "
+    "replaced. Use this when an edit_data or replace_data call went wrong. "
+    "One level of undo: calling it again redoes the change."),
+    scopes=[WRITE_SCOPE])(restore_data)
 
 
 # ==========================================
@@ -300,7 +324,9 @@ def _live_data_topics(user: dict) -> list:
     Without this a browsing client sees only the template and has to guess
     URIs; with it the tree matches the caller's real data.
     """
-    from joyverse.data import _topic_names, _describe, _topic_from_key, _data_prefix
+    from joyverse.data import (
+        _topic_names, _describe, _topic_from_key, _data_prefix, _is_internal,
+    )
     from joyverse.config import r2_client as _r2, BUCKET_NAME as _bucket
 
     try:
@@ -316,6 +342,8 @@ def _live_data_topics(user: dict) -> list:
         size = 0
         try:
             for obj in listing.get("Contents", []):
+                if _is_internal(obj.get("Key", "")):
+                    continue
                 if _topic_from_key(obj.get("Key", ""), prefix) == name:
                     body = _r2.get_object(Bucket=_bucket,
                                           Key=obj["Key"])["Body"].read().decode()

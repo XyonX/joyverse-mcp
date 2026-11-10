@@ -37,7 +37,7 @@ Only these {count} tools exist. Never invent another name.
 |---|---|---|
 | Who they are: name, location, occupation, facts | profile | `get_profile` / `update_profile` |
 | Their story: journey, goals, background | bio | `get_bio` / `update_bio` |
-| Inferred traits, preferences, current focus | memory | `get_memory` / `add_memory_trait` / `update_focus` |
+| Inferred traits, patterns, preferences, current context | memory | `get_memory` / `add_memory_trait` / `add_observed_pattern` / `update_preference` / `update_context` |
 | Growing logs by subject: dsa, projects, reading, ... | data topics | `get_data` / `list_topics` / `edit_data` |
 
 Profile and memory are small and change often. The bio is a narrative -- read
@@ -56,7 +56,8 @@ accumulate over time.
 - **Prefer the targeted write.** `edit_data` changes one thing and leaves the
   rest of the log intact. `replace_data` overwrites the whole log and anything
   you omit is deleted -- it refuses to drop keys unless you pass
-  `allow_drop`, so if it went through, that was deliberate.
+  `allow_drop`, so if it went through, that was deliberate. If a write to a
+  data log went wrong, `restore_data` brings back the version it replaced.
 - **Address items by matching a field, never by array index.** Indices shift
   the moment anything is added or removed, so `projects[3]` can be a
   different project tomorrow. Match on something like

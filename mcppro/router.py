@@ -6,6 +6,57 @@ from mcppro.types import (
 )
 from mcppro.scopes import require_scopes
 
+# Protocol revisions this server can speak, newest first. The transport is
+# stateless request/response in all of them, so the differences that matter
+# here are only what the client is told it negotiated.
+SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26")
+DEFAULT_PROTOCOL_VERSION = "2025-03-26"
+
+
+def negotiate_version(requested) -> str:
+    """Echo the client's version when we support it, else offer our own.
+
+    The spec leaves it to the client to disconnect if it cannot use what it
+    is offered. Answering with a fixed version regardless told a newer client
+    it had negotiated something it never asked for.
+    """
+    if requested in SUPPORTED_PROTOCOL_VERSIONS:
+        return requested
+    return DEFAULT_PROTOCOL_VERSION
+
+
+def check_arguments(schema: dict, arguments: dict):
+    """Validate tool arguments against the advertised schema.
+
+    Returns an error string, or None when the call can go ahead. Only what a
+    caller can act on is enforced -- a missing required argument, or a name
+    the tool does not have -- because those previously surfaced as a Python
+    TypeError the model could not interpret. A number sent where a string is
+    expected is converted rather than refused: it is unambiguous, and tools
+    are written against strings.
+    """
+    properties = (schema or {}).get("properties", {})
+    required = (schema or {}).get("required", [])
+
+    missing = [name for name in required if name not in arguments]
+    if missing:
+        return ("Missing required argument(s): " + ", ".join(missing)
+                + ". Expected: " + (", ".join(properties) or "none") + ".")
+
+    unknown = [name for name in arguments if name not in properties]
+    if unknown:
+        return ("Unknown argument(s): " + ", ".join(unknown)
+                + ". This tool accepts: "
+                + (", ".join(properties) or "no arguments") + ".")
+
+    for name, value in arguments.items():
+        if properties[name].get("type") == "string" \
+                and isinstance(value, (int, float)) \
+                and not isinstance(value, bool):
+            arguments[name] = str(value)
+    return None
+
+
 # JSON-RPC codes the MCP spec assigns to resource operations.
 RESOURCE_NOT_FOUND = -32002
 FORBIDDEN = -32003
@@ -70,7 +121,8 @@ async def route_request(
         if resource_registry is not None and resource_registry.has_any():
             capabilities["resources"] = {}
         result = {
-            "protocolVersion": "2025-03-26",
+            "protocolVersion": negotiate_version(
+                (params or {}).get("protocolVersion")),
             "capabilities": capabilities,
             "serverInfo": MCPServerInfo(
                 name=server_name, 
@@ -85,9 +137,15 @@ async def route_request(
     # ==========================================
     # B. LIFECYCLE: Initialized Notification
     # ==========================================
-    elif method == "notifications/initialized":
-        # Must not reply. Just exit generator.
+    elif isinstance(method, str) and method.startswith("notifications/"):
+        # A notification never gets a reply -- not the initialized one, and
+        # not cancelled/progress/roots either. Answering those with "method
+        # not found" sent the client an error for a message that has no id.
         return
+
+    elif method == "ping":
+        # Liveness check; the spec's answer is an empty result.
+        yield transport.format_sse(transport.build_jsonrpc_response(req_id, {}))
 
     # ==========================================
     # C. DISCOVERY: List Tools
@@ -106,13 +164,33 @@ async def route_request(
             tool_name = params.get("name")
             # Copied, and tolerant of an explicit null: the dict is mutated
             # below when the auth context is injected.
-            arguments = dict(params.get("arguments") or {})
+            raw_arguments = params.get("arguments") or {}
+            arguments = dict(raw_arguments) \
+                if isinstance(raw_arguments, dict) else None
             
             func = tool_functions.get(tool_name)
+            schema = next((t.inputSchema for t in tool_schemas
+                           if t.name == tool_name), None)
+            problem = None
+            # `user` is the injected auth context, never a caller's to set.
+            # A client that sends one is ignored rather than refused: the
+            # value is overwritten below either way.
+            if func and arguments and \
+                    "user" in inspect.signature(func).parameters:
+                arguments.pop("user", None)
+            if func and arguments is None:
+                problem = "arguments must be an object of named values."
+            elif func and schema is not None:
+                problem = check_arguments(schema, arguments)
             
             if not func:
                 result = MCPToolResult(
                     content=[MCPContent(type="text", text=f"Unknown tool: {tool_name}")],
+                    isError=True
+                )
+            elif problem:
+                result = MCPToolResult(
+                    content=[MCPContent(type="text", text=problem)],
                     isError=True
                 )
             else:
@@ -140,12 +218,20 @@ async def route_request(
                         isError=False
                     )
                 except Exception as e:
+                    # A refusal raised on purpose (a missing scope) carries
+                    # its own wording; only an unexpected failure is labelled
+                    # a server error.
+                    detail = getattr(e, "detail", None)
+                    text = str(detail) if detail else f"Server Error: {str(e)}"
                     result = MCPToolResult(
-                        content=[MCPContent(type="text", text=f"Server Error: {str(e)}")],
+                        content=[MCPContent(type="text", text=text)],
                         isError=True
                     )
 
-            payload = transport.build_jsonrpc_response(req_id, result.model_dump())
+            # exclude_none: a text block must not carry `"data": null` and
+            # `"mimeType": null`, which strict clients reject.
+            payload = transport.build_jsonrpc_response(
+                req_id, result.model_dump(exclude_none=True))
             yield transport.format_sse(payload)
 
     # ==========================================
