@@ -41,6 +41,10 @@ class NoSuchKey(Exception):
     """Stands in for the botocore ClientError the real R2 raises on a miss."""
 
 
+class PreconditionFailed(Exception):
+    """Stands in for the 412 R2 returns when a conditional write loses."""
+
+
 class FakeR2:
     """Minimal in-memory stand-in for the boto3 S3 client.
 
@@ -54,9 +58,22 @@ class FakeR2:
     def get_object(self, Bucket, Key):
         if Key not in self.store:
             raise NoSuchKey(f"NoSuchKey: The specified key does not exist. {Key}")
-        return {"Body": io.BytesIO(self.store[Key])}
+        return {"Body": io.BytesIO(self.store[Key]),
+                "ETag": self._etag(Key)}
 
-    def put_object(self, Bucket, Key, Body, ContentType=None, Metadata=None):
+    def _etag(self, Key):
+        import hashlib
+        return '"' + hashlib.md5(self.store[Key]).hexdigest() + '"'
+
+    def put_object(self, Bucket, Key, Body, ContentType=None, Metadata=None,
+                   IfMatch=None, IfNoneMatch=None):
+        # Conditional writes, as R2 implements them: If-None-Match "*" only
+        # succeeds for a new key, If-Match only for the version that was read.
+        if IfNoneMatch == "*" and Key in self.store:
+            raise PreconditionFailed(f"PreconditionFailed: {Key} exists")
+        if IfMatch is not None and (
+                Key not in self.store or self._etag(Key) != IfMatch):
+            raise PreconditionFailed(f"PreconditionFailed: {Key} changed")
         if isinstance(Body, str):
             Body = Body.encode("utf-8")
         elif hasattr(Body, "read"):
@@ -70,6 +87,20 @@ class FakeR2:
                           "Body": Body, "ContentType": ContentType,
                           "Metadata": Metadata})
         return {}
+
+    def upload_fileobj(self, Fileobj, Bucket, Key, ExtraArgs=None):
+        """Managed upload: read the stream in bounded chunks, like s3transfer."""
+        extra = ExtraArgs or {}
+        chunks = []
+        while True:
+            chunk = Fileobj.read(1024 * 1024)
+            if not chunk:
+                break
+            assert len(chunk) <= 1024 * 1024, "read() returned more than asked"
+            chunks.append(chunk)
+        return self.put_object(Bucket, Key, b"".join(chunks),
+                               ContentType=extra.get("ContentType"),
+                               Metadata=extra.get("Metadata"))
 
     def delete_object(self, Bucket=None, Key=None):
         self.store.pop(Key, None)
@@ -184,10 +215,15 @@ def _clear_storage_cache():
     A limit test that passes alone and fails in the suite is the signature of
     exactly this leak.
     """
-    from joyverse import storage
+    from joyverse import storage, identity
+    from joyverse import auth as _auth
     storage._USAGE_CACHE.clear()
+    identity._LOOKUP_CACHE.clear()
+    _auth._oauth_dependency.cache_clear()
     yield
     storage._USAGE_CACHE.clear()
+    identity._LOOKUP_CACHE.clear()
+    _auth._oauth_dependency.cache_clear()
 
 
 @pytest.fixture

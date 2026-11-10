@@ -11,6 +11,21 @@ RESOURCE_NOT_FOUND = -32002
 FORBIDDEN = -32003
 from typing import Any, Dict, AsyncGenerator
 
+from starlette.concurrency import run_in_threadpool
+
+
+async def _run(fn, *args, **kwargs):
+    """Call a tool or resource function without blocking the event loop.
+
+    Tools are ordinary blocking functions -- they talk to object storage and
+    fetch URLs. Called directly from this coroutine, one slow tool froze every
+    other request, the health check included, until it returned. A worker
+    thread keeps the loop free; a tool written as a coroutine is awaited as is.
+    """
+    if inspect.iscoroutinefunction(fn):
+        return await fn(*args, **kwargs)
+    return await run_in_threadpool(fn, *args, **kwargs)
+
 async def route_request(
     method: str, 
     req_id: int, 
@@ -89,7 +104,9 @@ async def route_request(
     # ==========================================
     elif method == "tools/call":
             tool_name = params.get("name")
-            arguments = params.get("arguments", {})
+            # Copied, and tolerant of an explicit null: the dict is mutated
+            # below when the auth context is injected.
+            arguments = dict(params.get("arguments") or {})
             
             func = tool_functions.get(tool_name)
             
@@ -116,7 +133,7 @@ async def route_request(
                     if "user" in inspect.signature(func).parameters:
                         arguments["user"] = user_context  # Injected by auth!
                     
-                    output = func(**arguments)
+                    output = await _run(func, **arguments)
                     
                     result = MCPToolResult(
                         content=[MCPContent(type="text", text=str(output))],
@@ -142,9 +159,10 @@ async def route_request(
                 "This server does not expose resources")
             yield transport.format_sse(payload)
             return
+        # The lister reads the caller's live data, so it blocks like a tool.
+        listed = await _run(resource_registry.list_resources, user_context)
         result = {
-            "resources": [r.model_dump(exclude_none=True)
-                          for r in resource_registry.list_resources(user_context)]
+            "resources": [r.model_dump(exclude_none=True) for r in listed]
         }
         payload = transport.build_jsonrpc_response(req_id, result)
         yield transport.format_sse(payload)
@@ -196,7 +214,7 @@ async def route_request(
 
         try:
             from mcppro.resources import _call
-            content = _call(reader, user_context, uri)
+            content = await _run(_call, reader, user_context, uri)
         except Exception as e:
             payload = transport.build_jsonrpc_error(
                 req_id, transport.JSONRPCError.INTERNAL_ERROR,

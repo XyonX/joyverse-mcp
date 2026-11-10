@@ -1,4 +1,5 @@
 from fastapi import Request, HTTPException
+from functools import lru_cache
 from typing import Dict
 import jwt
 import os
@@ -35,6 +36,23 @@ def _bearer_secret() -> str:
 # STRATEGY 1 -- OAuth (Auth0 or any OIDC provider)
 # ==========================================
 
+@lru_cache(maxsize=4)
+def _oauth_dependency(issuer: str, audience: str):
+    """One validator per (issuer, audience), kept for the process lifetime.
+
+    The validator owns the JWKS client, and the JWKS client owns the key
+    cache. Building a new one per request threw that cache away, so every
+    single request refetched the provider's discovery document and signing
+    keys -- two network round trips before any work, and a rate limit away
+    from failing every login at once. Keyed on the configuration so a changed
+    issuer or audience still gets its own validator.
+    """
+    from mcppro.auth import oauth_bearer_auth
+
+    return oauth_bearer_auth(issuer=issuer, audience=audience,
+                             algorithms=("RS256",))
+
+
 def oauth_auth(request: Request) -> Dict:
     """Validate an OAuth 2.1 access token and resolve it to a user_id.
 
@@ -47,16 +65,8 @@ def oauth_auth(request: Request) -> Dict:
     deliberate and load-bearing: identity comes from the person, so Claude,
     Cursor and ChatGPT all resolve to the same profile.
     """
-    from mcppro.auth import oauth_bearer_auth
-
-    # Built per request rather than cached at import: configuration comes from
-    # the environment, and building it is cheap (no network happens until a
-    # token is actually verified).
-    dependency = oauth_bearer_auth(
-        issuer=jv_config.issuer_url(),
-        audience=jv_config.AUTH0_AUDIENCE,
-        algorithms=("RS256",),
-    )
+    dependency = _oauth_dependency(jv_config.issuer_url(),
+                                   jv_config.AUTH0_AUDIENCE)
 
     ctx = dependency(request)
     claims = ctx.get("claims", {})
@@ -104,9 +114,16 @@ def jwt_auth(request: Request) -> Dict:
         raise HTTPException(status_code=401, detail="Missing authentication token")
 
     try:
-        payload = jwt.decode(token, _bearer_secret(), algorithms=["HS256"])
+        # `exp` is required: a token minted without one would otherwise be
+        # valid forever, with no way to retire it short of rotating the
+        # secret for everyone.
+        payload = jwt.decode(token, _bearer_secret(), algorithms=["HS256"],
+                             options={"require": ["exp"]})
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="Token expired")
+    except jwt.MissingRequiredClaimError:
+        raise HTTPException(status_code=401,
+                            detail="Invalid token: missing exp claim")
     except jwt.InvalidTokenError:
         raise HTTPException(status_code=401, detail="Invalid token")
 
@@ -122,11 +139,12 @@ def jwt_auth(request: Request) -> Dict:
     except ValueError as e:
         raise HTTPException(status_code=401, detail=f"Invalid handle: {e}")
 
-    # Self-issued tokens carry both scopes. An explicit claim is honoured if
-    # present so a token can be narrowed later, but the default is full access
-    # -- these tokens are minted for our own operator.
+    # Self-issued tokens carry both scopes when they say nothing about scope
+    # -- these tokens are minted for our own operator. A `scope` claim that is
+    # PRESENT is authoritative, including an empty one: a token narrowed to
+    # nothing must grant nothing, not fall back to full access.
     scopes = _BEARER_SCOPES
-    if payload.get("scope"):
+    if "scope" in payload:
         from mcppro.scopes import parse_scopes
 
         scopes = parse_scopes(payload["scope"])

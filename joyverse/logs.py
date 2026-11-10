@@ -3,15 +3,16 @@
 One R2 object per day, one JSON entry per line. A day is small enough to read
 whole, so retrieval needs no index -- asking about a date reads one object.
 
-Appending is a read-modify-write because object storage has no append. At this
-volume (tens of entries a day, one user) that is fine, but it is not atomic:
-two appends racing can lose one. A local database would not fix this -- same
-race, plus a second source of truth to disagree with R2.
+Appending is a read-modify-write because object storage has no append. The
+write is conditional on the version that was read, so two appends racing
+cannot lose one: the loser's write is refused and it appends again to the
+fresh day.
 """
 import json
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
+from joyverse.atomic import get_versioned, put_versioned, retry_on_conflict
 from joyverse.config import BUCKET_NAME, get_log_key
 
 # Default window when the caller names no date at all: the last 24 hours.
@@ -117,23 +118,19 @@ def _read_day(user_id: str, day: str) -> List[dict]:
     return out
 
 
+@retry_on_conflict
 def _append_day(user_id: str, day: str, entry: dict):
     from joyverse.config import r2_client
 
     key = get_log_key(user_id, day)
-    existing = ""
-    try:
-        existing = r2_client.get_object(Bucket=BUCKET_NAME,
-                                        Key=key)["Body"].read().decode("utf-8")
-    except Exception as e:
-        if "NoSuchKey" not in str(e) and "does not exist" not in str(e):
-            raise
+    raw, version = get_versioned(r2_client, BUCKET_NAME, key)
+    existing = raw.decode("utf-8") if raw else ""
 
     if existing and not existing.endswith("\n"):
         existing += "\n"
     body = existing + json.dumps(entry, separators=(",", ":")) + "\n"
-    r2_client.put_object(Bucket=BUCKET_NAME, Key=key, Body=body.encode("utf-8"),
-                         ContentType="application/x-ndjson")
+    put_versioned(r2_client, BUCKET_NAME, key, body.encode("utf-8"), version,
+                  ContentType="application/x-ndjson")
 
 
 # ==========================================

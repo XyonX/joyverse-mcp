@@ -1,7 +1,12 @@
 import copy
 import json
 from datetime import datetime
-from joyverse.config import r2_client, BUCKET_NAME, get_memory_key
+from joyverse.atomic import (
+    MISSING, get_versioned, put_versioned, retry_on_conflict,
+)
+from joyverse.config import (
+    r2_client, BUCKET_NAME, get_memory_key, ensure_doc_size,
+)
 
 DEFAULT_MEMORY = {
     "personality": [],
@@ -23,32 +28,41 @@ def _load_memory(user_id: str) -> dict:
             return fresh
         raise e
 
-def _save_memory(user_id: str, data: dict):
+def _load_memory_versioned(user_id: str) -> tuple:
+    """Memory plus the version a write must still match. Never writes."""
+    raw, version = get_versioned(r2_client, BUCKET_NAME,
+                                 get_memory_key(user_id))
+    if raw is None:
+        return copy.deepcopy(DEFAULT_MEMORY), MISSING
+    return json.loads(raw.decode("utf-8")), version
+
+
+def _save_memory(user_id: str, data: dict, version=None):
     key = get_memory_key(user_id)
     data["last_updated"] = datetime.now().strftime("%Y-%m-%d")
-    r2_client.put_object(
-        Bucket=BUCKET_NAME,
-        Key=key,
-        Body=json.dumps(data, indent=2).encode("utf-8"),
-        ContentType="application/json"
-    )
+    body = json.dumps(data, indent=2).encode("utf-8")
+    ensure_doc_size(body, "memory model")
+    put_versioned(r2_client, BUCKET_NAME, key, body, version,
+                  ContentType="application/json")
 
 def get_memory(user: dict) -> str:
     user_id = user["user_id"]
     return json.dumps(_load_memory(user_id))
 
+@retry_on_conflict
 def add_memory_trait(trait: str, user: dict) -> str:
     user_id = user["user_id"]
-    memory = _load_memory(user_id)
+    memory, version = _load_memory_versioned(user_id)
     if len(memory["personality"]) >= 20:
         memory["personality"].pop(0)
     memory["personality"].append(trait)
-    _save_memory(user_id, memory)
+    _save_memory(user_id, memory, version)
     return f"Added trait: {trait}"
 
+@retry_on_conflict
 def update_focus(focus: str, user: dict) -> str:
     user_id = user["user_id"]
-    memory = _load_memory(user_id)
+    memory, version = _load_memory_versioned(user_id)
     memory["current_context"]["main_focus"] = focus
-    _save_memory(user_id, memory)
+    _save_memory(user_id, memory, version)
     return f"Updated focus to: {focus}"

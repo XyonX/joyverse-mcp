@@ -2,7 +2,12 @@ import difflib
 import json
 from typing import Any, Dict, List, Optional
 
-from joyverse.config import r2_client, BUCKET_NAME, get_data_key
+from joyverse.atomic import (
+    Conflict, get_versioned, put_versioned, retry_on_conflict,
+)
+from joyverse.config import (
+    r2_client, BUCKET_NAME, get_data_key, ensure_doc_size,
+)
 
 
 # ==========================================
@@ -173,11 +178,16 @@ def _load_topic(user_id: str, topic: str):
         raise
 
 
-def _save_topic(user_id: str, topic: str, payload: dict):
-    r2_client.put_object(
-        Bucket=BUCKET_NAME,
-        Key=get_data_key(user_id, topic),
-        Body=json.dumps(payload, indent=2).encode("utf-8"),
+def _save_topic(user_id: str, topic: str, payload: dict, version=None):
+    """Write a data log, guarded by the version it was read at.
+
+    Raises ValueError when the log has outgrown the document limit, and
+    atomic.Conflict when another writer got there first.
+    """
+    body = json.dumps(payload, indent=2).encode("utf-8")
+    ensure_doc_size(body, f"'{topic}' data log")
+    put_versioned(
+        r2_client, BUCKET_NAME, get_data_key(user_id, topic), body, version,
         ContentType="application/json",
     )
 
@@ -365,6 +375,7 @@ def _coerce_structured(value):
                   "truncated.")
 
 
+@retry_on_conflict
 def edit_data(topic: str, op: str, value: Any = None,
               # NOTE: hint stays Optional[list] so the advertised inputSchema
               # remains `array` (schema stability for clients). The dotted-
@@ -405,12 +416,13 @@ def edit_data(topic: str, op: str, value: Any = None,
                            "got": type(match).__name__})
 
 
-    raw = None
+    # The version read here guards the write at the end: if another edit
+    # lands in between, the save raises Conflict and the whole edit is redone
+    # against the fresh log rather than overwriting it.
     try:
-        raw = r2_client.get_object(Bucket=BUCKET_NAME, Key=key)["Body"].read()
+        raw, version = get_versioned(r2_client, BUCKET_NAME, key)
     except Exception as e:
-        if "NoSuchKey" not in str(e):
-            return json.dumps({"error": f"R2 error: {e}"})
+        return json.dumps({"error": f"R2 error: {e}"})
 
     doc = json.loads(raw.decode("utf-8")) if raw else {}
     match = match or {}
@@ -476,7 +488,7 @@ def edit_data(topic: str, op: str, value: Any = None,
                                   if isinstance(i, dict)],
                 })
             removed = items.pop(idx)
-            _save_topic(user_id, topic, doc)
+            _save_topic(user_id, topic, doc, version)
             return json.dumps({"ok": True, "op": "remove",
                                "removed": removed})
 
@@ -532,10 +544,14 @@ def edit_data(topic: str, op: str, value: Any = None,
     except ValueError as e:
         return json.dumps({"error": str(e)})
 
-    _save_topic(user_id, topic, doc)
+    try:
+        _save_topic(user_id, topic, doc, version)
+    except ValueError as e:
+        return json.dumps({"error": str(e)})
     return json.dumps({"ok": True, "op": op, "topic": topic})
 
 
+@retry_on_conflict
 def replace_data(topic: str, data: str, allow_drop: bool = False,
                  user: dict = None) -> str:
     """Overwrite a whole data log. Anything omitted is deleted.
@@ -554,14 +570,19 @@ def replace_data(topic: str, data: str, allow_drop: bool = False,
     except json.JSONDecodeError:
         return "Error: Invalid JSON data"
 
-    existing = None
-    raw = None
+    body = json.dumps(parsed, indent=2).encode("utf-8")
     try:
-        raw = r2_client.get_object(Bucket=BUCKET_NAME, Key=key)["Body"].read()
-        existing = json.loads(raw.decode("utf-8"))
+        ensure_doc_size(body, f"'{topic}' data log")
+    except ValueError as e:
+        return f"Error: {e}"
+
+    existing = None
+    try:
+        raw, version = get_versioned(r2_client, BUCKET_NAME, key)
+        if raw is not None:
+            existing = json.loads(raw.decode("utf-8"))
     except Exception as e:
-        if "NoSuchKey" not in str(e):
-            return f"Error: R2 error: {e}"
+        return f"Error: R2 error: {e}"
 
     if (existing and isinstance(existing, dict) and isinstance(parsed, dict)
             and not allow_drop):
@@ -579,11 +600,13 @@ def replace_data(topic: str, data: str, allow_drop: bool = False,
     if raw is not None:
         _snapshot(user_id, topic, raw)
 
+    # Guarded by the version the drop check was made against, so the check
+    # cannot be invalidated by an edit that lands in between.
     try:
-        r2_client.put_object(
-            Bucket=BUCKET_NAME, Key=key,
-            Body=json.dumps(parsed, indent=2).encode("utf-8"),
-            ContentType="application/json")
+        put_versioned(r2_client, BUCKET_NAME, key, body, version,
+                      ContentType="application/json")
         return f"Replaced data for {topic}"
+    except Conflict:
+        raise
     except Exception as e:
         return f"Error writing to R2: {str(e)}"
