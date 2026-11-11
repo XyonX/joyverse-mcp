@@ -314,7 +314,7 @@ def main():
                 f"{username}. Use your tools to store it properly: build "
                 f"my profile with update_profile, write my bio with "
                 f"update_bio, and create data logs for dsa, projects, skills "
-                f"and reading with update_data.\n\n{persona}"
+                f"and reading with replace_data.\n\n{persona}"
             ),
         })
         made = run_conversation(client, llm, tools, messages,

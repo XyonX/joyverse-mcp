@@ -7,7 +7,6 @@ dependencies = [
     "fastapi>=0.100.0",
     "uvicorn>=0.20.0",
     "pydantic>=2.0.0",
-    "requests>=2.28.0",
     # 1.36 is the first line where put_object accepts both IfMatch and
     # IfNoneMatch, which the conditional writes in joyverse/atomic.py need.
     "boto3>=1.36.0",
