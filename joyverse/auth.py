@@ -139,6 +139,13 @@ def jwt_auth(request: Request) -> Dict:
     except ValueError as e:
         raise HTTPException(status_code=401, detail=f"Invalid handle: {e}")
 
+    # After the signature and expiry checks, so the revocation list is only
+    # consulted for tokens that would otherwise be accepted.
+    from joyverse import revocation
+
+    if revocation.is_revoked(payload, identity.normalise_handle(handle)):
+        raise HTTPException(status_code=401, detail="Token revoked")
+
     # Self-issued tokens carry both scopes when they say nothing about scope
     # -- these tokens are minted for our own operator. A `scope` claim that is
     # PRESENT is authoritative, including an empty one: a token narrowed to
@@ -173,6 +180,12 @@ def with_client(strategy):
 
     def dependency(request: Request) -> Dict:
         context = strategy(request)
+        # Counted per account once the caller is known, so one runaway agent
+        # cannot slow anyone else down.
+        from joyverse import ratelimit
+
+        ratelimit.check(context.get("user_id"),
+                        jv_config.RATE_LIMIT_PER_MINUTE)
         name, source = clients.detect(request, context)
         if name:
             context["client"] = name

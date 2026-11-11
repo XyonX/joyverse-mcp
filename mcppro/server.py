@@ -19,8 +19,14 @@ class MCPServer:
     def __init__(self, name: str, version: str = "1.0.0", auth: Callable = None,
                  instructions: str = "", extra_routes: Iterable = None,
                  resource_url: Optional[str] = None,
-                 max_body_bytes: Optional[int] = 32 * 1024 * 1024):
+                 max_body_bytes: Optional[int] = 32 * 1024 * 1024,
+                 tool_observer: Optional[Callable] = None):
         self.name = name
+        # Called after every tool call as
+        # observer(tool_name, user_context, arguments, output_text, is_error).
+        self.tool_observer = tool_observer
+        # name -> {func, description, title, arguments}. See prompt().
+        self._prompts: Dict[str, dict] = {}
         # Largest request body /mcp will read. Without a cap a single request
         # can make the server buffer an arbitrary amount of memory before any
         # tool gets a chance to refuse it. None disables the check.
@@ -60,6 +66,21 @@ class MCPServer:
         
         # Create the FastAPI app
         self._app = self._create_app()
+
+    def prompt(self, name: str = None, description: str = "",
+               title: str = None, arguments: list = None):
+        """Register a prompt: a reusable request the user picks by name.
+
+        The function returns the text of the message; its keyword arguments
+        are the prompt's arguments, each described in `arguments` as
+        {"name", "description", "required"}.
+        """
+        def decorator(func):
+            self._prompts[name or func.__name__] = {
+                "func": func, "description": description, "title": title,
+                "arguments": list(arguments or [])}
+            return func
+        return decorator
 
     def _make_resource_decorator(self):
         """Build the @server.resource decorator."""
@@ -184,7 +205,9 @@ class MCPServer:
                         instructions=self.instructions,
                         user_context=user,
                         tool_scopes=self._tool_scopes,
-                        resource_registry=self.resources
+                        resource_registry=self.resources,
+                        tool_observer=self.tool_observer,
+                        prompts=self._prompts,
                     ):
                         yield sse_chunk
 

@@ -15,13 +15,18 @@ from joyverse.data import (
     get_data, list_topics, edit_data, replace_data, restore_data, delete_data,
 )
 from joyverse.search import search
-from joyverse.account import whoami
+from joyverse.account import whoami, export_account
+from joyverse.audit import get_audit_log
+from joyverse import audit as jv_audit
+from joyverse import prompt_library
 from joyverse.history import list_history, restore_version
 from joyverse.storage import (
     register_client, list_clients, save_file_from_url, save_file_text,
     get_file, list_files, delete_file,
 )
-from joyverse.uploads import save_file_base64
+from joyverse.uploads import (
+    save_file_base64, request_upload, complete_upload,
+)
 from joyverse.logs import (
     add_to_log, get_log, list_log_days, add_to_agent_log, get_agent_log,
     delete_log_entry,
@@ -98,6 +103,25 @@ server.tool(description=(
     "for them, and a count of what is stored. Call it once at the start of a "
     "session instead of guessing your own name or the date."),
     scopes=[READ_SCOPE])(whoami)
+
+server.tool(description=(
+    "Build a zip of everything written about the user -- profile, bio, "
+    "memory, every data topic, the whole log, agents' journals -- and return "
+    "a download link that lasts an hour. Use it when the user asks for a "
+    "copy or backup of their data. Stored files are listed inside the zip "
+    "rather than copied into it; fetch those with get_file."),
+    scopes=[WRITE_SCOPE],
+    param_docs={"include_history": "Also include the earlier versions kept "
+                                   "for undo. Leave out normally."})(
+        export_account)
+
+server.tool(description=(
+    "The record of every change made to this account: when, which tool, "
+    "which agent, and what it was aimed at -- written by the server, not by "
+    "the agents. Use it to answer 'who changed this' or 'what did the agents "
+    "do today'. Same windowing as get_log; pass tool to see one tool's "
+    "calls. It never contains the content that was written."),
+    scopes=[READ_SCOPE])(get_audit_log)
 
 server.tool(description=(
     "Find something by content when you do not know where or when it was "
@@ -272,6 +296,30 @@ server.tool(description=(
     "for anything large host it publicly and use save_file_from_url."),
     scopes=[WRITE_SCOPE])(save_file_base64)
 
+server.tool(description=(
+    "Get a link to upload a LARGE file straight to storage, for a file that "
+    "is too big for save_file_base64 and has no public URL for "
+    "save_file_from_url -- typically something on your own machine. You (or "
+    "a script you run) send the file with an HTTP PUT to the returned url, "
+    "using exactly the Content-Type shown, then call complete_upload. "
+    "size_bytes is the file's exact size. Only useful if you can make HTTP "
+    "requests yourself; a chat-only assistant cannot use the link."),
+    scopes=[WRITE_SCOPE],
+    param_docs={
+        "path": "Where to store it inside your client folder, e.g. "
+                "renders/final.mp4.",
+        "size_bytes": "The file's exact size in bytes.",
+        "mime_type": "e.g. video/mp4. Must be sent as Content-Type on the "
+                     "PUT.",
+        "overwrite": "true to replace a file already at that path.",
+    })(request_upload)
+
+server.tool(description=(
+    "Finish an upload started with request_upload: confirms the file "
+    "arrived and matches the size declared. Call it after the PUT succeeds. "
+    "A file larger than declared, or over the storage limit, is removed."),
+    scopes=[WRITE_SCOPE])(complete_upload)
+
 # The user's log and the agents' journals are separate on purpose: the log
 # answers "what have I been doing", and an autonomous agent ticking every few
 # minutes used to write almost all of it. The descriptions draw the line, and
@@ -383,11 +431,12 @@ server.tool(description=(
 _READ_ONLY = {
     "whoami", "search", "get_profile", "get_bio", "get_memory", "get_data",
     "list_topics", "list_history", "list_clients", "get_log", "get_agent_log",
-    "list_log_days", "get_file", "list_files",
+    "list_log_days", "get_file", "list_files", "get_audit_log",
 }
 _ADDITIVE = {
     "add_memory_trait", "add_observed_pattern", "add_to_log",
-    "add_to_agent_log", "register_client",
+    "add_to_agent_log", "register_client", "export_account",
+    "request_upload", "complete_upload",
 }
 _REPLACING = {
     "update_profile", "update_bio", "update_focus", "update_preference",
@@ -428,6 +477,25 @@ def _annotate(tool_server):
 
 
 _annotate(server)
+
+
+# ==========================================
+# AUDIT TRAIL
+#
+# Every call to a tool that can change something is recorded by the server
+# itself. Which tools count comes from the annotations above, so a new write
+# tool is audited without anyone remembering to add it.
+# ==========================================
+
+def _audit(tool_name, user, arguments, output, is_error):
+    if jv_config.AUDIT_ENABLED and tool_name not in _READ_ONLY:
+        jv_audit.record(user, tool_name, arguments, output, is_error)
+
+
+server.tool_observer = _audit
+
+# Prompts the user can pick from their client's menu.
+prompt_library.register(server)
 
 
 # ==========================================

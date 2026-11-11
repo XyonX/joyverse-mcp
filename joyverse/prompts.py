@@ -100,7 +100,7 @@ saves an image, another fetches it.
 | Text you just wrote | `save_file_text` |
 | A public https:// URL | `save_file_from_url` |
 | Bytes already in context (an attachment, something you generated) | `save_file_base64` |
-| Something large with no URL | host it publicly, then `save_file_from_url` |
+| Something large with no URL | `request_upload`, or host it publicly, then `save_file_from_url` |
 
 The file tools take a `path` inside your client's folder -- sub-folders like
 `images/` or `renders/` are yours to organise. That is the one place a path
@@ -108,7 +108,9 @@ is correct: for data tools you name a *topic* and the server decides where
 it lives.
 
 `save_file_base64` is capped at 8 MB and those bytes are charged to your
-context window, so prefer a URL for anything substantial.
+context window, so prefer a URL for anything substantial. If you can make
+HTTP requests yourself, `request_upload` gives you a link to PUT a large
+local file straight to storage; call `complete_upload` afterwards.
 
 ## Two logs: the user's, and yours
 

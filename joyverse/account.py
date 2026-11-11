@@ -106,3 +106,116 @@ def whoami(user: dict = None) -> str:
     except Exception as e:
         out["stored"] = {"error": f"Could not read storage: {e}"}
     return json.dumps(out, indent=2)
+
+
+# ==========================================
+# EXPORT
+# ==========================================
+
+EXPORT_MAX_BYTES = 200 * 1024 * 1024
+EXPORT_LINK_SECONDS = 3600
+
+
+def export_account(include_history: bool = False, user: dict = None) -> str:
+    """Bundle everything written about the user into one downloadable zip.
+
+    Profile, bio, memory, every data topic, the whole log, agents' journals,
+    the client registry and the audit trail, laid out as they are stored.
+    Stored files are listed in files.json rather than copied in -- they can
+    be gigabytes, and each is already downloadable with get_file.
+    """
+    import io
+    import zipfile
+
+    from joyverse.config import BUCKET_NAME, r2_client
+    from joyverse.paths import storage_prefix
+    from joyverse.search import _read_many
+    from joyverse.storage import INTERNAL_FILES, _list_all
+
+    user_id = user["user_id"]
+    root = f"users/{user_id}/"
+    storage = storage_prefix(user_id)
+    try:
+        objects = _list_all(root)
+    except Exception as e:
+        return json.dumps({"error": f"Could not read storage: {e}"})
+
+    wanted, files, old_exports, total = [], [], [], 0
+    for obj in objects:
+        key, rest = obj["Key"], obj["Key"][len(root):]
+        if rest.startswith("exports/"):
+            old_exports.append(key)
+            continue
+        if rest.startswith("uploads/"):
+            continue
+        if rest.startswith("history/") and not include_history:
+            continue
+        if rest.split("/")[-1] == ".previous.json" and not include_history:
+            continue
+        if key.startswith(storage):
+            inner = key[len(storage):]
+            parts = inner.split("/")
+            is_journal = len(parts) == 3 and parts[1] == "journal"
+            if inner not in INTERNAL_FILES and not is_journal:
+                files.append({"client": parts[0],
+                              "path": "/".join(parts[1:]),
+                              "size_bytes": obj.get("Size", 0)})
+                continue
+        wanted.append(key)
+        total += obj.get("Size", 0)
+
+    if total > EXPORT_MAX_BYTES:
+        return json.dumps({
+            "error": "The account's documents are too large to export in "
+                     "one request.",
+            "size_mb": round(total / (1024 * 1024), 1),
+            "limit_mb": EXPORT_MAX_BYTES // (1024 * 1024)})
+
+    now = datetime.now(timezone.utc)
+    buffer = io.BytesIO()
+    missing = []
+    try:
+        bodies = _read_many(wanted)
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as bundle:
+            for key in wanted:
+                if bodies.get(key) is None:
+                    missing.append(key[len(root):])
+                    continue
+                bundle.writestr(key[len(root):], bodies[key])
+            bundle.writestr("files.json", json.dumps(files, indent=2))
+            bundle.writestr("export.json", json.dumps({
+                "user_id": user_id,
+                "exported_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+                "documents": len(wanted) - len(missing),
+                "could_not_read": missing,
+                "stored_files_listed": len(files),
+                "note": "Stored files are listed in files.json, not "
+                        "included. Download each with get_file."}, indent=2))
+        body = buffer.getvalue()
+        key = f"{root}exports/joyverse-export-{now:%Y%m%dT%H%M%SZ}.zip"
+        r2_client.put_object(Bucket=BUCKET_NAME, Key=key, Body=body,
+                             ContentType="application/zip")
+        # One export is kept: an old one is a stale copy of everything.
+        for old in old_exports:
+            if old == key:
+                # Two exports in the same second share a name; the new one
+                # has already replaced the old.
+                continue
+            r2_client.delete_object(Bucket=BUCKET_NAME, Key=old)
+        url = r2_client.generate_presigned_url(
+            "get_object", Params={"Bucket": BUCKET_NAME, "Key": key},
+            ExpiresIn=EXPORT_LINK_SECONDS)
+    except Exception as e:
+        return json.dumps({"error": f"Could not build the export: {e}"})
+
+    out = {"ok": True, "url": url,
+           "expires_in_minutes": EXPORT_LINK_SECONDS // 60,
+           "size_bytes": len(body),
+           "documents": len(wanted) - len(missing),
+           "stored_files_listed": len(files),
+           "note": "Give the user this link; it is theirs to download. "
+                   "Stored files are listed inside, not included. Calling "
+                   "this again replaces the export."}
+    if missing:
+        out["could_not_read"] = missing
+    return json.dumps(out, indent=2)

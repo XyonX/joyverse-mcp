@@ -68,7 +68,7 @@ class TestHandshake:
     def test_lists_every_tool(self, client):
         # Compared against the expected set rather than a bare count, so adding
         # or removing a tool gives a readable diff instead of "22 != 21".
-        assert len(client.list_tools()) == 37
+        assert len(client.list_tools()) == 41
 
     def test_tool_names_match_the_server(self, client):
         names = {t["name"] for t in client.list_tools()}
@@ -78,6 +78,8 @@ class TestHandshake:
             "add_observed_pattern", "update_preference", "update_context",
             "add_to_agent_log", "get_agent_log",
             "restore_data",
+            "export_account", "get_audit_log", "request_upload",
+            "complete_upload",
             "whoami", "search", "list_history", "restore_version",
             "delete_data", "delete_profile_field", "delete_bio_section",
             "delete_memory_item", "delete_log_entry",

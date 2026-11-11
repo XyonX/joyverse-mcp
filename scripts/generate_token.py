@@ -30,6 +30,7 @@ JWT_SECRET_OVERRIDE = ""
 # ============================================================
 
 import os
+import secrets
 import sys
 import time
 from datetime import datetime, timezone
@@ -101,6 +102,9 @@ def main() -> int:
         "handle": handle,
         "iat": now,
         "exp": expires_at,
+        # An id of its own, so this one token can be retired with
+        # scripts/revoke_token.py without affecting any other.
+        "jti": secrets.token_hex(8),
     }
     if AGENT.strip():
         payload["agent"] = AGENT.strip().lower()
@@ -116,6 +120,7 @@ def main() -> int:
     print(f"Expires   : {datetime.fromtimestamp(expires_at, timezone.utc)} UTC")
     print(f"          (in {EXPIRES_IN_HOURS} hours)")
     print(f"Secret    : {source}")
+    print(f"Token id  : {payload['jti']}  (revoke with scripts/revoke_token.py)")
     print()
     print("--- TOKEN ---")
     print(token)

@@ -259,6 +259,19 @@ CONDITIONAL_WRITES = os.getenv("JOYVERSE_CONDITIONAL_WRITES", "true").strip(
     ).lower() not in ("0", "false", "no", "off")
 
 
+# Requests one account may make per minute before it is told to slow down.
+# 0 turns the limit off.
+RATE_LIMIT_PER_MINUTE = _env_int("JOYVERSE_RATE_LIMIT_PER_MINUTE", 300)
+
+# Record every changing tool call under users/<id>/audit/. It costs one
+# extra read and write per change.
+AUDIT_ENABLED = os.getenv("JOYVERSE_AUDIT", "true").strip().lower() in (
+    "1", "true", "yes", "on")
+
+# How long an upload link from request_upload stays usable.
+UPLOAD_LINK_SECONDS = _env_int("JOYVERSE_UPLOAD_LINK_MINUTES", 60) * 60
+
+
 def ensure_doc_size(body: bytes, what: str = "document"):
     """Refuse a text document that has grown past MAX_DOC_BYTES."""
     if len(body) > MAX_DOC_BYTES:

@@ -286,3 +286,54 @@ def client_summary(r2, bucket: str, user_id: str) -> dict:
             "log_entries": {k: {"total": v[0], "operational": v[1]}
                             for k, v in sorted(in_log.items(),
                                                key=lambda x: -x[1][0])}}
+
+
+# ==========================================
+# DELETE AN ACCOUNT
+# ==========================================
+
+def delete_account(r2, bucket: str, user_id: str, apply: bool = False) -> dict:
+    """Remove everything stored for one account, and its logins.
+
+    Deliberately NOT an MCP tool: nothing an assistant can be talked into
+    should be able to erase an account. It is run by the operator, from
+    scripts/delete_account.py. Without `apply` it only reports.
+
+    Order matters: the logins go first, so a request arriving mid-way finds
+    no account rather than a half-deleted one.
+    """
+    from joyverse import identity
+
+    if not identity.is_user_id(user_id):
+        raise ValueError(f"Invalid user id: {user_id!r}")
+    prefix = f"users/{user_id}/"
+    objects = _list(r2, bucket, prefix)
+
+    raw, version = get_versioned(r2, bucket, identity.REGISTRY_KEY)
+    registry = json.loads(raw.decode("utf-8")) if raw else {}
+    removed = {}
+    for table in ("handles", "identities", "emails"):
+        names = sorted(k for k, v in (registry.get(table) or {}).items()
+                       if v == user_id)
+        removed[table] = names
+        for name in names:
+            registry[table].pop(name)
+    known = user_id in (registry.get("users") or {})
+    (registry.get("users") or {}).pop(user_id, None)
+
+    report = {"applied": apply, "user_id": user_id, "known_account": known,
+              "objects": len(objects),
+              "bytes": sum(o.get("Size", 0) for o in objects),
+              "logins_removed": removed}
+    if not apply:
+        return report
+
+    if raw is not None and (known or any(removed.values())):
+        put_versioned(r2, bucket, identity.REGISTRY_KEY,
+                      json.dumps(registry, indent=2).encode("utf-8"), version,
+                      ContentType="application/json")
+    identity._LOOKUP_CACHE.clear()
+    for obj in objects:
+        r2.delete_object(Bucket=bucket, Key=obj["Key"])
+    report["objects_left"] = len(_list(r2, bucket, prefix))
+    return report

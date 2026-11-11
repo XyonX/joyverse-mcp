@@ -217,15 +217,19 @@ def _clear_storage_cache():
     """
     from joyverse import storage, identity
     from joyverse import auth as _auth
-    from joyverse import timezones
+    from joyverse import timezones, ratelimit, revocation
     storage._USAGE_CACHE.clear()
     identity._LOOKUP_CACHE.clear()
     timezones.forget()
+    ratelimit.reset()
+    revocation.forget()
     _auth._oauth_dependency.cache_clear()
     yield
     storage._USAGE_CACHE.clear()
     identity._LOOKUP_CACHE.clear()
     timezones.forget()
+    ratelimit.reset()
+    revocation.forget()
     _auth._oauth_dependency.cache_clear()
 
 
@@ -241,7 +245,7 @@ def fake_r2(monkeypatch, no_network_guard):
     # or the registry would be read from and written to the real bucket.
     modules = ["config", "profile", "bio", "memory", "data", "identity",
                "storage", "uploads", "logs", "search", "history",
-               "timezones", "account"]
+               "timezones", "account", "audit", "revocation"]
     for name in modules:
         mod = __import__(f"joyverse.{name}", fromlist=["r2_client"])
         monkeypatch.setattr(mod, "r2_client", fake, raising=False)
