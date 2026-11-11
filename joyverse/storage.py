@@ -19,7 +19,9 @@ import urllib.request
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
-from joyverse.atomic import get_versioned, put_versioned, retry_on_conflict
+from joyverse.atomic import (
+    get_versioned, is_not_found, put_versioned, retry_on_conflict,
+)
 from joyverse.config import (
     MAX_FILE_BYTES, MAX_USER_BYTES, FETCH_TIMEOUT_SECONDS, MAX_REDIRECTS,
     BUCKET_NAME, MB, GB, STORAGE_ROOT, FETCH_TOTAL_SECONDS, MAX_DOC_BYTES,
@@ -714,7 +716,11 @@ def get_file(path: str, client: str = None, user: dict = None) -> str:
 
     try:
         head = r2_client.head_object(Bucket=BUCKET_NAME, Key=key)
-    except Exception:
+    except Exception as e:
+        # Only a genuine miss is "no file". A storage outage reported that
+        # way sends the caller off to re-upload something that is still there.
+        if not is_not_found(e):
+            return json.dumps({"error": f"Could not reach storage: {e}"})
         return json.dumps({
             "error": f"No file at {relative}",
             "client": client,
@@ -737,52 +743,71 @@ def get_file(path: str, client: str = None, user: dict = None) -> str:
     })
 
 
-def list_files(prefix: str = None, client: str = None,
-               user: dict = None) -> str:
-    """List stored files for one client, or for every client."""
-    from joyverse.config import r2_client
+DEFAULT_LIST_LIMIT = 200
+MAX_LIST_LIMIT = 1000
 
+
+def list_files(prefix: str = None, client: str = None, limit: int = None,
+               user: dict = None) -> str:
+    """List stored files for one client, or for every client.
+
+    One pass over the user's storage answers everything: the file list, the
+    total, and the per-client breakdown. It used to take a full scan for the
+    total, another for the list, one more per registered client, and a HEAD.
+    """
     user_id = user["user_id"]
-    scan = storage_prefix(user_id)
+    root = storage_prefix(user_id)
+    scan = root
     if client:
         try:
             scan = client_prefix(user_id, client)
         except ValueError as e:
             return json.dumps({"error": f"Invalid client: {e}"})
+    try:
+        limit = int(limit) if limit else DEFAULT_LIST_LIMIT
+    except (TypeError, ValueError):
+        return json.dumps({"error": "limit must be a number."})
+    limit = max(1, min(limit, MAX_LIST_LIMIT))
 
-    total, count = user_usage(user_id, use_cache=False)
+    total, count, registry_bytes = 0, 0, 0
+    usage_by_client: Dict[str, int] = {}
     entries = []
-    for obj in _list_all(scan):
-        relative = obj["Key"][len(scan):]
-        if relative in INTERNAL_FILES or any(
-                relative.endswith("/" + f) for f in INTERNAL_FILES):
+    for obj in _list_all(root):
+        key, size = obj["Key"], obj.get("Size", 0)
+        total += size
+        count += 1
+        under_root = key[len(root):]
+        if under_root in INTERNAL_FILES:
+            registry_bytes += size
             continue
-        if prefix and not obj["Key"].startswith(scan + prefix):
+        owner = under_root.split("/", 1)[0]
+        usage_by_client[owner] = usage_by_client.get(owner, 0) + size
+
+        if not key.startswith(scan):
+            continue
+        relative = key[len(scan):]
+        if prefix and not relative.startswith(prefix):
             continue
         entries.append({
             "path": relative,
-            "size_bytes": obj.get("Size", 0),
+            "size_bytes": size,
             "modified": str(obj.get("LastModified", ""))[:19],
         })
     entries.sort(key=lambda e: e["path"])
+    _USAGE_CACHE[user_id] = (time.time(), total, count)
 
-    by_client = {}
-    for name in _load_clients(user_id)["clients"]:
-        used, _ = _scan(client_prefix(user_id, name))
-        if used:
-            by_client[name] = round(used / GB, 3)
+    by_client = {name: round(used / GB, 3)
+                 for name, used in sorted(usage_by_client.items()) if used}
 
-    registry_bytes = 0
-    try:
-        registry_bytes = r2_client.head_object(
-            Bucket=BUCKET_NAME, Key=clients_key(user_id)).get(
-                "ContentLength", 0) or 0
-    except Exception:
-        pass
-
+    matched = len(entries)
+    entries = entries[:limit]
     return json.dumps({
         "files": entries,
         "count": len(entries),
+        # Without these a caller that hits the limit believes it has seen
+        # every file.
+        "total_matched": matched,
+        "has_more": matched > len(entries),
         "usage": {
             "total_gb": round(total / GB, 3),
             "file_gb": round((total - registry_bytes) / GB, 3),
@@ -804,6 +829,28 @@ def delete_file(path: str, client: str = None, user: dict = None) -> str:
         key, relative = resolve_file_path(user_id, client, path)
     except ValueError as e:
         return json.dumps({"error": f"Invalid path: {e}"})
+
+    # Deleting a key that is not there succeeds in object storage, so without
+    # this check a mistyped path was reported as "deleted", indistinguishable
+    # from a real removal, while the intended file stayed where it was.
+    try:
+        r2_client.head_object(Bucket=BUCKET_NAME, Key=key)
+    except Exception as e:
+        if not is_not_found(e):
+            return json.dumps({"error": f"Could not reach storage: {e}"})
+        # Still a success -- the file is gone either way, so a repeated
+        # delete stays harmless -- but it says so instead of claiming to
+        # have removed something.
+        used, _ = user_usage(user_id)
+        return json.dumps({
+            "ok": True,
+            "deleted": None,
+            "already_absent": True,
+            "note": f"There was no file at {relative}, so nothing was "
+                    "removed. If you meant a different file, call list_files "
+                    "for the exact paths.",
+            "used_gb": round(used / GB, 3),
+        })
 
     try:
         r2_client.delete_object(Bucket=BUCKET_NAME, Key=key)

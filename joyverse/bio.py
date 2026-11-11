@@ -1,6 +1,6 @@
 import json
 from joyverse.atomic import (
-    Conflict, get_versioned, put_versioned, retry_on_conflict,
+    Conflict, get_versioned, is_not_found, put_versioned, retry_on_conflict,
 )
 from joyverse.config import (
     r2_client, BUCKET_NAME, get_bio_key, ensure_doc_size,
@@ -19,7 +19,7 @@ def get_bio(user: dict) -> str:
         response = r2_client.get_object(Bucket=BUCKET_NAME, Key=key)
         return response["Body"].read().decode("utf-8")
     except Exception as e:
-        if "NoSuchKey" in str(e):
+        if is_not_found(e):
             return json.dumps(
                 {"error": f"No bio found for {user_id}. Build it with update_bio first."})
         return json.dumps({"error": f"R2 error: {str(e)}"})

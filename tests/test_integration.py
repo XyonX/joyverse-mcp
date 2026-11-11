@@ -322,6 +322,8 @@ class TestRunPySmoke:
         assert {s.name for s in run.server._tool_schemas} == {
             "get_profile", "update_profile", "get_bio", "update_bio",
             "get_memory", "add_memory_trait", "update_focus",
+            "add_observed_pattern", "update_preference", "update_context",
+            "restore_data",
             "get_data", "list_topics", "edit_data", "replace_data",
             "register_client", "list_clients", "save_file_from_url",
             "save_file_text", "get_file", "list_files", "delete_file",

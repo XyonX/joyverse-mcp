@@ -1,5 +1,5 @@
 from fastapi import FastAPI, Request, Depends
-from fastapi.responses import StreamingResponse, JSONResponse
+from fastapi.responses import StreamingResponse, JSONResponse, Response
 from typing import Callable, Dict, Any, Iterable, Optional
 import json
 import uvicorn
@@ -7,7 +7,6 @@ import uvicorn
 from mcppro.auth import no_auth
 from mcppro.decorators import create_tool_decorator
 from mcppro.discovery import challenge_header
-from mcppro.resources import ResourceRegistry
 from mcppro.resources import ResourceRegistry
 from mcppro.router import route_request
 
@@ -51,55 +50,16 @@ class MCPServer:
         # Resources live in their own registry so the tool path stays untouched.
         self.resources = ResourceRegistry()
 
-        # Resources live in their own registry so the tool path stays untouched.
-        self.resources = ResourceRegistry()
-
         # Create the @server.tool decorator bound to this instance
         self.tool = create_tool_decorator(self)
 
         # Resource decorators, mirroring server.tool.
         self.resource = self._make_resource_decorator()
         self.resource_template = self._make_resource_template_decorator()
-
-        # Resource decorators, mirroring server.tool.
-        self.resource = self._make_resource_decorator()
-        self.resource_template = self._make_resource_template_decorator()
+        
         
         # Create the FastAPI app
         self._app = self._create_app()
-
-    def _make_resource_decorator(self):
-        """Build the @server.resource decorator."""
-        def resource(uri: str, *, name: str = "", description: str = "",
-                     mime_type: str = "text/plain", title=None,
-                     size=None, priority=None, audience=None,
-                     last_modified=None, scopes=None):
-            def decorator(func):
-                self.resources.add_resource(
-                    uri, func, name=name, description=description,
-                    mime_type=mime_type, title=title, size=size,
-                    priority=priority, audience=audience,
-                    last_modified=last_modified, scopes=scopes)
-                return func
-            return decorator
-        return resource
-
-    def _make_resource_template_decorator(self):
-        """Build the @server.resource_template decorator."""
-        def resource_template(uri_template: str, *, name: str = "",
-                              description: str = "",
-                              mime_type: str = "text/plain", title=None,
-                              priority=None, audience=None,
-                              last_modified=None, scopes=None):
-            def decorator(func):
-                self.resources.add_template(
-                    uri_template, func, name=name, description=description,
-                    mime_type=mime_type, title=title, priority=priority,
-                    audience=audience, last_modified=last_modified,
-                    scopes=scopes)
-                return func
-            return decorator
-        return resource_template
 
     def _make_resource_decorator(self):
         """Build the @server.resource decorator."""
@@ -191,29 +151,44 @@ class MCPServer:
                 body = json.loads(b"".join(chunks))
             except Exception:
                 return {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}
-            
-            method = body.get("method")
-            req_id = body.get("id")
-            params = body.get("params", {})
-            
-            # 2. Route the request through our logic
+
+            # A body is one message or a batch of them (an array). Anything
+            # else -- a bare string, a number, an empty array -- is not a
+            # JSON-RPC request, and used to surface as an HTTP 500.
+            messages = body if isinstance(body, list) else [body]
+            if not messages or not all(isinstance(m, dict) for m in messages):
+                return JSONResponse(
+                    {"jsonrpc": "2.0", "id": None,
+                     "error": {"code": -32600, "message": "Invalid Request"}},
+                    status_code=400)
+
+            # A message without an id is a notification (or a response) and
+            # expects no reply. When nothing in the body does, the answer is
+            # 202 Accepted with no body rather than an empty event stream.
+            if not any("id" in m for m in messages):
+                return Response(status_code=202)
+
+            # 3. Route each request through our logic
             async def generate_response():
-                async for sse_chunk in route_request(
-                    method=method,
-                    req_id=req_id,
-                    params=params,
-                    server_name=self.name,
-                    server_version=self.version,
-                    tool_schemas=self._tool_schemas,
-                    tool_functions=self._tool_functions,
-                    instructions=self.instructions,
-                    user_context=user,
-                    tool_scopes=self._tool_scopes,
-                    resource_registry=self.resources
-                ):
-                    yield sse_chunk
-            
-            # 3. Return as SSE Stream
+                for message in messages:
+                    if "id" not in message:
+                        continue
+                    async for sse_chunk in route_request(
+                        method=message.get("method"),
+                        req_id=message.get("id"),
+                        params=message.get("params") or {},
+                        server_name=self.name,
+                        server_version=self.version,
+                        tool_schemas=self._tool_schemas,
+                        tool_functions=self._tool_functions,
+                        instructions=self.instructions,
+                        user_context=user,
+                        tool_scopes=self._tool_scopes,
+                        resource_registry=self.resources
+                    ):
+                        yield sse_chunk
+
+            # 4. Return as SSE Stream
             return StreamingResponse(
                 generate_response(),
                 media_type="text/event-stream",
