@@ -247,6 +247,11 @@ MAX_DOC_BYTES = _env_int("JOYVERSE_MAX_DOC_MB", 2) * MB
 MAX_REQUEST_BYTES = max(_env_int("JOYVERSE_MAX_REQUEST_MB", 16) * MB,
                         MAX_INLINE_BYTES * 3 // 2)
 
+# The user's log records what the USER did. An agent that writes more than
+# this many entries to it in one day is keeping its own running log there, so
+# further entries that day are filed in the agent's journal instead.
+USER_LOG_DAILY_PER_CLIENT = _env_int("JOYVERSE_USER_LOG_DAILY_PER_CLIENT", 12)
+
 # Read-modify-write updates are guarded with If-Match / If-None-Match so two
 # concurrent writers cannot silently overwrite each other. Only turn this off
 # for a storage backend that rejects conditional PutObject headers.

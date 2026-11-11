@@ -55,7 +55,9 @@ def _describe(raw: str) -> str:
         return ""
     if not isinstance(parsed, dict):
         return ""
-    for field in ("description", "summary"):
+    # `purpose` is what agent-seeded topics use; without it over half the
+    # catalogue listed with a blank description.
+    for field in ("description", "summary", "purpose"):
         value = parsed.get(field)
         if isinstance(value, str) and value.strip():
             return value.strip()

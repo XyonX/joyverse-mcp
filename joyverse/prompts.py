@@ -62,12 +62,15 @@ accumulate over time.
   the moment anything is added or removed, so `projects[3]` can be a
   different project tomorrow. Match on something like
   `{{"name": "OmniHome"}}` instead.
-- **Claim a client name once, then reuse it.** Call `list_clients` first; if
-  your name is already there, use it. A second name splits your files across
-  folders nobody expects. Use the plain product name (`chatgpt`, `claude`,
-  `hermes`) and keep it stable -- the name identifies the assistant you are,
-  never the project you are working on. You only need to register in order to
-  WRITE -- reading another client's file just needs its name.
+- **Let the server name you.** It usually knows which assistant is calling:
+  `list_clients` returns it as `you_are`, and when that is set you leave the
+  `client` argument out of every tool. Only if `you_are` is empty do you pass
+  a name -- reuse one already in the list, because a
+  second name splits your files across folders nobody expects. Use the plain
+  product name (`chatgpt`,
+  `claude`, `hermes`) or your agent name, and keep it stable -- the name
+  identifies the assistant you are, never the project you are working on.
+  Reading another client's file just needs its name.
 - **Never fabricate.** If you were not given real information, record that it
   is empty rather than inventing plausible values. Every profile and bio fact
   must come from the user.
@@ -96,10 +99,23 @@ it lives.
 `save_file_base64` is capped at 8 MB and those bytes are charged to your
 context window, so prefer a URL for anything substantial.
 
-## Logging work
+## Two logs: the user's, and yours
 
-Log before you finish a conversation that did real work. One entry per
-meaningful piece of work, not per tool call.
+**The user's log (`add_to_log`, `get_log`, `list_log_days`) is about what the
+USER did** -- practised DSA, worked on a project, shipped something. It is
+what they read when they ask "what have I been doing", so it must stay short
+and be about them. Log there when the conversation involved something the
+user did or decided, one entry per meaningful thing, not per tool call.
+
+**Your own journal (`add_to_agent_log`, `get_agent_log`) is your log book.**
+Anything about YOUR work goes there: routing or monitoring ticks, status
+sweeps, what you tried, notes for your next session, handoffs. It lives in
+your own storage folder under `journal/` and never appears in the user's log.
+If you run on a schedule or keep a running record, that record is a journal.
+
+The server enforces the line: an `add_to_log` entry tagged as bookkeeping
+(tick, route, digest, monitor...), or one of many from the same agent in a
+day, is filed in your journal instead and the reply says so.
 
 Only the `summary` is read back later, so make it specific about both what
 was done and what it was about -- "fixed the FlexyGrid pricing table

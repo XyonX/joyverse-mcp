@@ -19,7 +19,9 @@ from joyverse.storage import (
     get_file, list_files, delete_file,
 )
 from joyverse.uploads import save_file_base64
-from joyverse.logs import add_to_log, get_log, list_log_days
+from joyverse.logs import (
+    add_to_log, get_log, list_log_days, add_to_agent_log, get_agent_log,
+)
 from joyverse.prompts import build_instructions
 from joyverse import auth as jv_auth
 
@@ -39,7 +41,10 @@ def build_auth():
 
     # One strategy is still wrapped, so the auth_method tagging and the
     # "first error wins" behaviour are identical in both configurations.
-    return any_auth(*strategies)
+    #
+    # with_client adds which agent is calling, read from the connection, so
+    # tools do not depend on the model knowing its own name.
+    return jv_auth.with_client(any_auth(*strategies))
 
 
 def build_discovery_routes():
@@ -162,16 +167,19 @@ server.tool(description=(
 # ==========================================
 
 server.tool(description=(
-    "Claim a client name so you can save and fetch files. Call list_clients "
-    "FIRST: if your name is already registered, reuse it instead of "
-    "registering again -- a second name splits your files across folders. Use "
-    "the plain product name (chatgpt, claude, hermes) and keep it stable "
-    "across sessions. You only need this to WRITE files; reading another "
-    "client's file just needs its name."),
+    "Claim a client name. You rarely need this: the server usually knows "
+    "which assistant is calling and registers it on first use -- call "
+    "list_clients and check `you_are`. Register only when `you_are` is empty. "
+    "If your name is already registered, reuse it instead of registering "
+    "again -- a second name splits your files across folders. Use the plain "
+    "product name (chatgpt, claude, hermes) and keep it stable across "
+    "sessions."),
     scopes=[WRITE_SCOPE])(register_client)
 
 server.tool(description=(
-    "List the client names you have registered, with their storage folders."),
+    "List the client names in use, with their storage folders. `you_are` is "
+    "the one the server already knows you to be -- when it is set you can "
+    "leave the client argument out of every other tool."),
     scopes=[READ_SCOPE])(list_clients)
 
 server.tool(description=(
@@ -197,33 +205,59 @@ server.tool(description=(
     "for anything large host it publicly and use save_file_from_url."),
     scopes=[WRITE_SCOPE])(save_file_base64)
 
-# `client` is the one argument a model guesses wrong: in an agency-style
-# conversation ("work for the NextBiz Studio brand") the word reads as "who
-# the work is for", and the project name went into the field while the
-# assistant's own identity never appeared. The description says what the
-# field is, and the per-parameter doc -- the part a model reads when picking
-# argument values -- repeats it where the decision is actually made.
-server.tool(description=(
-    "Record one thing that happened, so a later conversation can recall it. "
-    "Call this before you finish a conversation that did real work -- the "
-    "summary is the only part anyone reads back, so make it specific: say what "
-    "was done AND what it was about. 'Fixed FlexyGrid pricing table overflow' "
-    "is useful; 'worked on frontend' is not. Add tags so it can be found later, "
-    "and include any files you stored. client is YOUR own name as an "
-    "assistant (chatgpt, claude, hermes...), never the project or brand the "
-    "work was about -- that goes in tags."),
-    scopes=[WRITE_SCOPE],
-    param_docs={
-        "client": "Your own product name as the assistant doing the work "
-                  "(chatgpt, claude, hermes...), the same name you use for "
-                  "file storage. NOT the project, brand or person the work "
-                  "is about -- put that in tags instead. Call list_clients "
-                  "and reuse your exact existing name.",
-    })(add_to_log)
+# The user's log and the agents' journals are separate on purpose: the log
+# answers "what have I been doing", and an autonomous agent ticking every few
+# minutes used to write almost all of it. The descriptions draw the line, and
+# add_to_log also enforces it by filing operational entries in the caller's
+# journal.
+#
+# `client` used to be the argument a model guessed wrong -- it does not
+# reliably know its own name, and in an agency-style conversation the word
+# reads as "who the work is for". The server now works the name out from the
+# connection, so the argument is optional and described as an override.
+_CLIENT_DOC = (
+    "Usually leave this out: the server already knows which assistant is "
+    "calling. If you must set it, it is YOUR own name as the assistant "
+    "(chatgpt, claude, atlas...), exactly as list_clients shows it -- NOT the "
+    "project, brand or person the work is about; that goes in tags.")
 
 server.tool(description=(
-    "Read back what was logged. With no arguments, returns the last 24 hours -- "
-    "use that for 'what have we been doing'. Pass date for one whole day, or "
+    "Record something the USER did, so a later conversation can recall it: "
+    "'practised graph problems', 'shipped the FlexyGrid pricing page'. This "
+    "is the user's own activity log, read back when they ask what they have "
+    "been doing -- so one entry per meaningful thing, written about THEM. Do "
+    "NOT use it for your own working notes, status checks, routing ticks or "
+    "anything about what you as an agent did: those go in add_to_agent_log. "
+    "Make the summary specific about what was done AND what it was about, "
+    "and add tags so it can be found later. client is YOUR own name as an "
+    "assistant, never the project or brand the work was about -- that goes "
+    "in tags."),
+    scopes=[WRITE_SCOPE],
+    param_docs={"client": _CLIENT_DOC})(add_to_log)
+
+server.tool(description=(
+    "Write a note in YOUR OWN journal -- the agent's log book. Use this for "
+    "anything about your work rather than the user's: a routing or "
+    "monitoring tick, a status sweep, what you tried, a handoff for your "
+    "next session. It is stored in your own storage folder under journal/ "
+    "and never appears in the user's log. Summaries can be long (4000 "
+    "characters)."),
+    scopes=[WRITE_SCOPE],
+    param_docs={"client": _CLIENT_DOC})(add_to_agent_log)
+
+server.tool(description=(
+    "Read an agent's journal -- yours by default. No arguments gives the "
+    "last 24 hours; pass date for one day or since/until for a range. Pass "
+    "client to read another agent's journal, which is how you pick up where "
+    "another agent left off."),
+    scopes=[READ_SCOPE],
+    param_docs={"client": "Whose journal to read. Leave out for your own."})(
+        get_agent_log)
+
+server.tool(description=(
+    "Read back the USER'S log -- what they did. With no arguments, returns the "
+    "last 24 hours -- use that for 'what have I been doing'. Agents' own "
+    "journals are separate; read those with get_agent_log. Pass date for one whole day, or "
     "since/until for a range such as 12pm-2pm; both accept a bare date "
     "(2026-10-01) or a full timestamp. Check has_more: if it is true you are "
     "seeing a truncated view, so widen the window or raise limit."),

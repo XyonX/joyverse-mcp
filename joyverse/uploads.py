@@ -21,7 +21,7 @@ from joyverse.config import (
 )
 from joyverse.paths import resolve_file_path
 from joyverse.storage import (
-    check_capacity, existing_size, invalidate_usage, user_usage,
+    check_capacity, existing_size, invalidate_usage, pick_client, user_usage,
     StorageError,
 )
 
@@ -62,9 +62,9 @@ def save_file_base64(path: str, data: str, client: str = None,
     from joyverse.config import r2_client
 
     user_id = user["user_id"]
-    if not client:
-        return json.dumps({"error": "client is required.",
-                           "hint": "Call register_client first."})
+    client, problem = pick_client(client, user, register=True)
+    if problem:
+        return json.dumps(problem)
     try:
         key, relative = resolve_file_path(user_id, client, path)
     except ValueError as e:

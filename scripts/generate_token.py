@@ -14,6 +14,9 @@ Then give the printed token to your client as:
 # ============================================================
 
 HANDLE = "joydip"               # -> your user_id, e.g. u_8f3a91c7e4b2
+AGENT = ""                       # optional: the agent this token is for, e.g.
+                                 # "atlas". The server then knows who is
+                                 # calling without the model naming itself.
 EXPIRES_IN_HOURS = 24 * 7        # 168 = 7 days. Use 1 for short-lived tokens.
 ALGORITHM = "HS256"              # must match the server in joyverse/auth.py
 
@@ -99,6 +102,8 @@ def main() -> int:
         "iat": now,
         "exp": expires_at,
     }
+    if AGENT.strip():
+        payload["agent"] = AGENT.strip().lower()
 
     token = jwt.encode(payload, secret, algorithm=ALGORITHM)
 
