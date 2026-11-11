@@ -40,6 +40,11 @@ Only these {count} tools exist. Never invent another name.
 | Inferred traits, patterns, preferences, current context | memory | `get_memory` / `add_memory_trait` / `add_observed_pattern` / `update_preference` / `update_context` |
 | Growing logs by subject: dsa, projects, reading, ... | data topics | `get_data` / `list_topics` / `edit_data` |
 
+Do not know where something is, or when it happened? `search` looks through
+all of it by content -- use it before guessing a date or a topic name.
+`whoami` tells you which account this is, whether you may write, the name
+the server knows you by, and today's date for this person.
+
 Profile and memory are small and change often. The bio is a narrative -- read
 it when you need background, write it rarely. Data topics are the ones that
 accumulate over time.
@@ -58,6 +63,12 @@ accumulate over time.
   you omit is deleted -- it refuses to drop keys unless you pass
   `allow_drop`, so if it went through, that was deliberate. If a write to a
   data log went wrong, `restore_data` brings back the version it replaced.
+- **Deleting is for when the user asks.** `delete_data`,
+  `delete_profile_field`, `delete_bio_section`, `delete_memory_item` and
+  `delete_log_entry` each remove one thing. Confirm with the user first.
+  Profile, bio and memory keep their last few versions
+  (`list_history` / `restore_version`); a deleted topic comes back with
+  `restore_data`; a deleted file does not come back.
 - **Address items by matching a field, never by array index.** Indices shift
   the moment anything is added or removed, so `projects[3]` can be a
   different project tomorrow. Match on something like
@@ -127,7 +138,9 @@ under the same name you use for file storage. It is never the project, brand
 or person the work was about; that is what `tags` are for.
 
 To read: no arguments gives the last 24 hours; `date` gives one whole day;
-`since`/`until` gives a range. Call `list_log_days` rather than guessing a
+`since`/`until` gives a range. Dates are the user's own calendar days once
+their profile has a `timezone` (set it with `update_profile`); until then
+they are UTC. Call `list_log_days` rather than guessing a
 date. Check `has_more` -- if it is true you are looking at a truncated view,
 so widen the window or raise `limit`.
 
@@ -145,6 +158,17 @@ subjects they actually mentioned.
 _DESTRUCTIVE = {"replace_data", "delete_file"}
 
 
+def _is_destructive(server, name: str) -> bool:
+    """A tool is flagged when it is annotated destructive, or listed above."""
+    if name in _DESTRUCTIVE:
+        return True
+    for schema in getattr(server, "_tool_schemas", None) or []:
+        if getattr(schema, "name", None) == name:
+            return bool((getattr(schema, "annotations", None) or {})
+                        .get("destructiveHint"))
+    return False
+
+
 def _tool_lines(server):
     """Build the tool list from the live registry.
 
@@ -156,7 +180,8 @@ def _tool_lines(server):
     if not funcs:
         return ["- (no tools registered)"]
     return [
-        f"- `{name}`" + (" **DESTRUCTIVE**" if name in _DESTRUCTIVE else "")
+        f"- `{name}`" + (" **DESTRUCTIVE**"
+                         if _is_destructive(server, name) else "")
         for name in funcs
     ]
 

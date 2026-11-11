@@ -41,6 +41,17 @@ def _find_key_line(lines, field: str):
     return None
 
 
+_TIMEZONE_KEYS = ("timezone", "time zone", "tz")
+
+
+def _after_write(user_id: str, previous):
+    """Keep the version just replaced, and drop anything cached from it."""
+    from joyverse import history, timezones
+
+    history.keep(user_id, "profile", previous)
+    timezones.forget(user_id)
+
+
 def get_profile(user: dict) -> str:
     """Reads the user profile from R2."""
     user_id = user["user_id"]
@@ -195,8 +206,94 @@ def update_profile(field: str, value: str, user: dict) -> str:
     try:
         put_versioned(r2_client, BUCKET_NAME, key, body, version,
                       ContentType="text/markdown")
-        return result_msg
     except Conflict:
         raise
     except Exception as e:
         return f"Error writing to R2: {str(e)}"
+    _after_write(user_id, raw)
+
+    if not is_section and field.lower() in _TIMEZONE_KEYS:
+        from joyverse import timezones
+        got = timezones.parse(value)
+        if got:
+            result_msg += (f" (read as {got[1]}; log dates now follow this "
+                           "timezone)")
+        else:
+            result_msg += (" -- but that is not a timezone the server can "
+                           "read, so log dates stay in UTC. Use an IANA name "
+                           "such as Asia/Kolkata, or an offset such as "
+                           "UTC+5:30.")
+    return result_msg
+
+
+def _outline(lines) -> dict:
+    """The keys and sections a profile holds, for a helpful error."""
+    keys, sections = [], []
+    for line in lines:
+        stripped = line.strip()
+        if _is_header(line):
+            sections.append(_header_name(line))
+        elif stripped and not stripped.startswith("#") and ":" in stripped:
+            keys.append(stripped.split(":", 1)[0].strip())
+    return {"fields": keys, "sections": sections}
+
+
+@retry_on_conflict
+def delete_profile_field(field: str, user: dict = None) -> str:
+    """Remove one `key: value` line, or one whole `## Section`, from the profile.
+
+    A plain name removes the matching key line if there is one, otherwise the
+    section of that name; a leading '#' always means the section. The version
+    before the removal is kept (see restore_version).
+    """
+    user_id = user["user_id"]
+    try:
+        key = get_profile_key(user_id)
+    except ValueError as e:
+        return json.dumps({"error": f"Invalid user_id: {e}"})
+    bare = str(field or "").lstrip("#").strip()
+    if not bare:
+        return json.dumps({"error": "field is required."})
+
+    try:
+        raw, version = get_versioned(r2_client, BUCKET_NAME, key)
+    except Exception as e:
+        return json.dumps({"error": f"R2 error: {e}"})
+    if raw is None:
+        return json.dumps({"error": "There is no profile yet."})
+    lines = raw.decode("utf-8").split("\n")
+
+    removed = None
+    if not str(field).strip().startswith("#"):
+        at = _find_key_line(lines, bare)
+        if at is not None:
+            removed = {"field": lines[at].strip().split(":", 1)[0].strip(),
+                       "was": lines[at].strip().split(":", 1)[1].strip()}
+            del lines[at]
+    if removed is None:
+        start = next((i for i, line in enumerate(lines) if _is_header(line)
+                      and _header_name(line).lower() == bare.lower()), None)
+        if start is not None:
+            end = next((j for j in range(start + 1, len(lines))
+                        if _is_header(lines[j])), len(lines))
+            removed = {"section": _header_name(lines[start]),
+                       "lines_removed": end - start}
+            lines = lines[:start] + lines[end:]
+            while lines and not lines[-1].strip():
+                lines.pop()
+    if removed is None:
+        return json.dumps(dict(
+            {"error": f"The profile has no field or section named {bare!r}."},
+            **_outline(lines)))
+
+    try:
+        put_versioned(r2_client, BUCKET_NAME, key,
+                      "\n".join(lines).encode("utf-8"), version,
+                      ContentType="text/markdown")
+    except Conflict:
+        raise
+    except Exception as e:
+        return json.dumps({"error": f"Error writing to R2: {e}"})
+    _after_write(user_id, raw)
+    return json.dumps({"ok": True, "deleted": removed,
+                       "undo": "restore_version(document=\"profile\")"})

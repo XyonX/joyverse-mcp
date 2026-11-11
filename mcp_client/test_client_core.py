@@ -68,7 +68,7 @@ class TestHandshake:
     def test_lists_every_tool(self, client):
         # Compared against the expected set rather than a bare count, so adding
         # or removing a tool gives a readable diff instead of "22 != 21".
-        assert len(client.list_tools()) == 28
+        assert len(client.list_tools()) == 37
 
     def test_tool_names_match_the_server(self, client):
         names = {t["name"] for t in client.list_tools()}
@@ -78,6 +78,9 @@ class TestHandshake:
             "add_observed_pattern", "update_preference", "update_context",
             "add_to_agent_log", "get_agent_log",
             "restore_data",
+            "whoami", "search", "list_history", "restore_version",
+            "delete_data", "delete_profile_field", "delete_bio_section",
+            "delete_memory_item", "delete_log_entry",
             "get_data", "list_topics", "edit_data", "replace_data",
             "register_client", "list_clients", "save_file_from_url",
             "save_file_text", "get_file", "list_files", "delete_file",
@@ -269,3 +272,38 @@ class TestPersonaAndIsolation:
 
         assert data_keys, "the client wrote nothing to assert on"
         assert all(k.startswith(prefix) for k in data_keys)
+
+
+class TestNewToolsOverHttp:
+    """The search, whoami, delete and history tools through the real server."""
+
+    def test_log_search_delete_round_trip(self, client):
+        client.initialize()
+        logged = json.loads(client.call_tool("add_to_log", {
+            "summary": "Practised sliding window problems",
+            "client": "claude", "tags": ["dsa"]})["text"])
+        ts = logged["logged"]["ts"]
+
+        found = json.loads(client.call_tool("search", {"query": "sliding window", "where": ["log"]})["text"])
+        assert found["count"] == 1 and found["results"][0]["ts"] == ts
+
+        gone = json.loads(client.call_tool("delete_log_entry", {"ts": ts})["text"])
+        assert gone["ok"] and gone["removed_from"] == "user_log"
+        assert json.loads(client.call_tool("search", {"query": "sliding window"})["text"])["count"] == 0
+
+    def test_whoami_and_history(self, client):
+        client.initialize()
+        client.call_tool("update_profile", {"field": "name", "value": "A"})["text"]
+        client.call_tool("update_profile", {"field": "name", "value": "B"})["text"]
+        me = json.loads(client.call_tool("whoami", {})["text"])
+        assert me["can_write"] and me["stored"]["has_profile"]
+
+        versions = json.loads(client.call_tool("list_history", {"document": "profile"})["text"])
+        assert versions["count"] == 1
+        client.call_tool("restore_version", {"document": "profile"})["text"]
+        assert "name: A" in client.call_tool("get_profile", {})["text"]
+
+    def test_annotations_are_advertised(self, client):
+        tools = {t["name"]: t for t in client.list_tools()}
+        assert tools["search"]["annotations"]["readOnlyHint"] is True
+        assert tools["delete_data"]["annotations"]["destructiveHint"] is True

@@ -1,5 +1,6 @@
 import copy
 import json
+import threading
 from datetime import datetime, timezone
 from joyverse.atomic import (
     MISSING, get_versioned, is_not_found, put_versioned, retry_on_conflict,
@@ -15,6 +16,9 @@ DEFAULT_MEMORY = {
     "current_context": {"main_focus": "", "immediate_next": "", "mood": ""},
     "last_updated": ""
 }
+
+# The bytes last read on this thread, between a versioned load and its save.
+_PREVIOUS = threading.local()
 
 MAX_ITEMS = 20          # personality traits, and observed patterns
 MAX_ITEM_CHARS = 500
@@ -65,6 +69,9 @@ def _load_memory_versioned(user_id: str) -> tuple:
                                  get_memory_key(user_id))
     if raw is None:
         return copy.deepcopy(DEFAULT_MEMORY), MISSING
+    # Remembered so the save that follows can keep it as the earlier version
+    # without reading the object a second time.
+    _PREVIOUS.raw = (user_id, raw)
     return _normalise(json.loads(raw.decode("utf-8"))), version
 
 
@@ -75,6 +82,11 @@ def _save_memory(user_id: str, data: dict, version=None):
     ensure_doc_size(body, "memory model")
     put_versioned(r2_client, BUCKET_NAME, key, body, version,
                   ContentType="application/json")
+    held = getattr(_PREVIOUS, "raw", None)
+    _PREVIOUS.raw = None
+    if held and held[0] == user_id and held[1] != body:
+        from joyverse import history
+        history.keep(user_id, "memory", held[1])
 
 def get_memory(user: dict) -> str:
     user_id = user["user_id"]
@@ -152,3 +164,51 @@ def update_focus(focus: str, user: dict) -> str:
     memory["current_context"]["main_focus"] = focus
     _save_memory(user_id, memory, version)
     return f"Updated focus to: {focus}"
+
+
+_LISTS = {
+    "trait": "personality", "traits": "personality",
+    "personality": "personality",
+    "pattern": "observed_patterns", "patterns": "observed_patterns",
+    "observed_pattern": "observed_patterns",
+    "observed_patterns": "observed_patterns",
+}
+
+
+@retry_on_conflict
+def delete_memory_item(kind: str, text: str, user: dict = None) -> str:
+    """Remove one personality trait or observed pattern from memory.
+
+    `kind` is "trait" or "pattern". `text` is the entry, or any part of it
+    that identifies exactly one entry. To clear a preference or a context
+    field, set it to an empty value with update_preference / update_context.
+    """
+    field = _LISTS.get(str(kind or "").strip().lower())
+    if not field:
+        return json.dumps({"error": f"Unknown kind: {kind!r}",
+                           "kinds": ["trait", "pattern"]})
+    needle = str(text or "").strip().lower()
+    if not needle:
+        return json.dumps({"error": "text is required."})
+
+    memory, version = _load_memory_versioned(user["user_id"])
+    items = memory[field]
+    hits = [i for i, item in enumerate(items)
+            if str(item).strip().lower() == needle]
+    if not hits:
+        hits = [i for i, item in enumerate(items)
+                if needle in str(item).lower()]
+    if not hits:
+        return json.dumps({"error": f"No {field} entry matches {text!r}.",
+                           field: items})
+    if len(hits) > 1:
+        return json.dumps({
+            "error": f"{len(hits)} entries match {text!r}; nothing was "
+                     "removed.",
+            "matches": [items[i] for i in hits],
+            "hint": "Pass the full text of the one to remove."})
+
+    removed = items.pop(hits[0])
+    _save_memory(user["user_id"], memory, version)
+    return json.dumps({"ok": True, "deleted": {field: removed},
+                       "undo": "restore_version(document=\"memory\")"})

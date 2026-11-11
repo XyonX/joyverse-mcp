@@ -113,7 +113,8 @@ def create_tool_decorator(server_instance):
     registrations keep working unchanged.
     """
     def tool(description: str = "", scopes=None,
-             param_docs: Dict[str, str] = None):
+             param_docs: Dict[str, str] = None,
+             annotations: Dict[str, Any] = None):
         def decorator(func):
             # 1. Infer schema from function signature, folding in any
             #    per-parameter documentation.
@@ -123,7 +124,8 @@ def create_tool_decorator(server_instance):
             tool_def = MCPToolDefinition(
                 name=func.__name__,
                 description=description or func.__doc__ or "",
-                inputSchema=input_schema
+                inputSchema=input_schema,
+                annotations=dict(annotations) if annotations else None,
             )
             
             # 3. Register in server's internal registries

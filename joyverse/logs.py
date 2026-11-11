@@ -79,8 +79,13 @@ def _iso(dt: datetime) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def parse_when(value: str, field: str, end_of_day: bool = False) -> datetime:
+def parse_when(value: str, field: str, end_of_day: bool = False,
+               tz=timezone.utc) -> datetime:
     """Accept either a bare date or a full timestamp.
+
+    `tz` is the user's timezone: a bare date is THEIR calendar day and a
+    timestamp with no offset is THEIR wall-clock time. The result is always
+    UTC, which is how entries are stored.
 
     One parameter covers both styles, so `since="2026-10-01"` means midnight
     and `since="2026-10-01T12:00"` means noon. A bare date on `until` means the
@@ -92,17 +97,17 @@ def parse_when(value: str, field: str, end_of_day: bool = False) -> datetime:
     raw = value.strip()
     try:
         if len(raw) == 10:                       # YYYY-MM-DD
-            day = datetime.strptime(raw, "%Y-%m-%d").replace(
-                tzinfo=timezone.utc)
+            day = datetime.strptime(raw, "%Y-%m-%d").replace(tzinfo=tz)
             if end_of_day:
-                return day + timedelta(hours=23, minutes=59, seconds=59)
-            return day
+                day += timedelta(hours=23, minutes=59, seconds=59)
+            return day.astimezone(timezone.utc)
         if raw.endswith("Z"):
             raw = raw[:-1] + "+00:00"
         dt = datetime.fromisoformat(raw)
         if dt.tzinfo is None:
-            # Naive input is read as UTC, matching how timestamps are stored.
-            dt = dt.replace(tzinfo=timezone.utc)
+            # Naive input is read in the user's timezone (UTC when they
+            # have none), the way they would say a time out loud.
+            dt = dt.replace(tzinfo=tz)
         return dt.astimezone(timezone.utc)
     except ValueError:
         raise LogError({
@@ -401,7 +406,7 @@ def add_to_agent_log(summary: str, tags: Optional[list] = None,
     })
 
 
-def _resolve_window(date, since, until):
+def _resolve_window(date, since, until, tz=timezone.utc):
     """Work out which days to read and the exact instant bounds.
 
     Three ways in, deliberately kept distinct because they answer different
@@ -411,14 +416,15 @@ def _resolve_window(date, since, until):
       * neither        -> the rolling last N hours
     """
     if date:
-        day = parse_when(date, "date")
+        day = parse_when(date, "date", tz=tz)
         start = day
         end = day + timedelta(hours=23, minutes=59, seconds=59)
         return start, end
 
     if since or until:
-        start = parse_when(since, "since") if since else None
-        end = parse_when(until, "until", end_of_day=True) if until else None
+        start = parse_when(since, "since", tz=tz) if since else None
+        end = parse_when(until, "until", end_of_day=True, tz=tz) \
+            if until else None
         if end and not start:
             # `until` alone means "the day or so leading up to then". The
             # window used to be reported as open-ended while only the last
@@ -448,7 +454,8 @@ def get_log(date: str = None, since: str = None, until: str = None,
     user_id = user["user_id"]
     return _query(lambda day: _read_day(user_id, day),
                   lambda: _logged_days(user_id),
-                  date, since, until, limit, order, tags)
+                  date, since, until, limit, order, tags,
+                  _user_zone(user_id))
 
 
 def get_agent_log(client: str = None, date: str = None, since: str = None,
@@ -475,19 +482,38 @@ def get_agent_log(client: str = None, date: str = None, since: str = None,
     out = json.loads(_query(
         lambda day: _read_entries(f"{prefix}{day}.jsonl", day),
         lambda: _days_under(prefix),
-        date, since, until, limit, order, tags))
+        date, since, until, limit, order, tags, _user_zone(user_id)))
     if "error" not in out:
         out["client"] = client
     return json.dumps(out, indent=2)
 
 
+def _user_zone(user_id: str) -> tuple:
+    """(tzinfo, label) for this user; UTC when they have not set one."""
+    from joyverse import timezones
+
+    tz, label, _stated = timezones.for_user(user_id)
+    return tz, label
+
+
+def _with_local(entry: dict, tz) -> dict:
+    """A copy of an entry with its time in the user's timezone added."""
+    try:
+        local = parse_when(str(entry.get("ts", "")), "ts").astimezone(tz)
+    except LogError:
+        return entry
+    return dict(entry, local=local.strftime("%Y-%m-%d %H:%M"))
+
+
 def _query(read_day, logged_days, date, since, until, limit, order,
-           tags) -> str:
+           tags, zone=None) -> str:
     """Windowed read shared by the user's log and the agent journals.
 
     `read_day(day)` returns one day's entries; `logged_days()` returns the
-    set of dates that exist.
+    set of dates that exist. `zone` is the user's (tzinfo, label): dates in
+    the request are read in it, and each entry gains a `local` time.
     """
+    tz, tz_label = zone or (timezone.utc, "UTC")
     try:
         limit = int(limit) if limit else DEFAULT_LIMIT
         if limit < 1:
@@ -498,7 +524,7 @@ def _query(read_day, logged_days, date, since, until, limit, order,
         if order not in ("newest", "oldest"):
             raise LogError({"error": "order must be 'newest' or 'oldest'."})
 
-        start, end = _resolve_window(date, since, until)
+        start, end = _resolve_window(date, since, until, tz)
 
         # Bound the scan. A caller asking for years of history gets an error
         # rather than a very large read.
@@ -546,6 +572,8 @@ def _query(read_day, logged_days, date, since, until, limit, order,
 
         total = len(entries)
         page = entries[:limit]
+        if tz_label != "UTC":
+            page = [_with_local(entry, tz) for entry in page]
         return json.dumps({
             "entries": page,
             "count": len(page),
@@ -558,6 +586,9 @@ def _query(read_day, logged_days, date, since, until, limit, order,
             "order": order,
             "window_start": _iso(start) if start else None,
             "window_end": _iso(end) if end else None,
+            # Which timezone dates in the request were read in. `ts` is
+            # always UTC; `local` on each entry is this timezone.
+            "timezone": tz_label,
             "days_read": to_read,
         }, indent=2)
     except LogError as e:
@@ -610,6 +641,51 @@ def _within(entries: List[dict], start, end) -> List[dict]:
     return out
 
 
+def _local_days(user_id, utc_days, limit, total, include_counts, tz,
+                tz_label) -> str:
+    """list_log_days for a user whose day is not the UTC day.
+
+    Storage is one object per UTC day, so the user's calendar days can only
+    be known by reading the entries: one stored day holds parts of two of
+    theirs. One extra stored day is read so the oldest day shown is whole.
+    """
+    from joyverse.search import _read_many
+
+    keys = {day: get_log_key(user_id, day) for day in utc_days[:limit + 1]}
+    bodies = _read_many(keys.values())
+    by_day: dict = {}
+    for day, key in keys.items():
+        for line in (bodies.get(key) or "").splitlines():
+            try:
+                entry = json.loads(line)
+                ts = parse_when(str(entry.get("ts") or f"{day}T00:00:00Z"),
+                                "ts")
+            except (json.JSONDecodeError, LogError, AttributeError):
+                continue
+            local = ts.astimezone(tz).strftime("%Y-%m-%d")
+            by_day.setdefault(local, []).append(entry)
+
+    out = []
+    for day in sorted(by_day, reverse=True)[:limit]:
+        row = {"date": day}
+        if include_counts:
+            row["entries"] = len(by_day[day])
+            names = sorted({str(e.get("client")) for e in by_day[day]
+                            if e.get("client")})
+            if names:
+                row["clients"] = names
+        out.append(row)
+    return json.dumps({
+        "days": out,
+        "count": len(out),
+        "total_days": max(total, len(out)),
+        "has_more": total > limit,
+        "timezone": tz_label,
+        "next_step": f"Call get_log(date=\"{out[0]['date']}\") to read "
+                     "a day." if out else "No log entries yet.",
+    }, indent=2)
+
+
 def list_log_days(limit: int = 30, include_counts: bool = False,
                    user: dict = None) -> str:
     """See which days have a log, so you know what to ask for.
@@ -645,6 +721,11 @@ def list_log_days(limit: int = 30, include_counts: bool = False,
         total = len(days)
         shown = days[:limit]
 
+        tz, tz_label = _user_zone(user_id)
+        if tz_label != "UTC" and days:
+            return _local_days(user_id, [d for d, _ in days], limit, total,
+                               include_counts, tz, tz_label)
+
         # Counts need a read per day. Off by default so a 30-day listing is one
         # call rather than thirty; pass include_counts when the numbers matter.
         out = []
@@ -671,3 +752,117 @@ def list_log_days(limit: int = 30, include_counts: bool = False,
         return json.dumps(e.payload)
     except Exception as e:
         return json.dumps({"error": f"Could not list log days: {e}"})
+
+
+# ==========================================
+# DELETING ONE ENTRY
+# ==========================================
+
+def _brief(entry: dict) -> dict:
+    out = {"ts": entry.get("ts"), "summary": str(entry.get("summary", ""))[:160]}
+    if entry.get("client"):
+        out["client"] = entry["client"]
+    return out
+
+
+@retry_on_conflict
+def _remove_entry(key: str, day: str, when: datetime, match: str) -> dict:
+    """Remove the one entry at `when` from a day object.
+
+    Works on the stored lines rather than re-serialising parsed entries, so
+    every other line -- including one that will not parse -- is written back
+    byte for byte.
+    """
+    from joyverse.config import r2_client
+
+    raw, version = get_versioned(r2_client, BUCKET_NAME, key)
+    lines = (raw or b"").decode("utf-8").splitlines()
+    parsed = []
+    for index, line in enumerate(lines):
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(entry, dict):
+            parsed.append((index, entry))
+
+    def at_that_time(entry):
+        try:
+            return parse_when(str(entry.get("ts") or f"{day}T00:00:00Z"),
+                              "ts") == when
+        except LogError:
+            return False
+
+    hits = [(i, e) for i, e in parsed if at_that_time(e)]
+    if match:
+        hits = [(i, e) for i, e in hits
+                if match.lower() in str(e.get("summary", "")).lower()]
+    if not hits:
+        return {"error": f"No entry at {_iso(when)}"
+                         + (f" containing {match!r}" if match else "") + ".",
+                "entries_that_day": [_brief(e) for _, e in parsed][:30],
+                "hint": "Pass ts exactly as get_log returned it."}
+    if len(hits) > 1:
+        return {"error": f"{len(hits)} entries share that timestamp; "
+                         "nothing was removed.",
+                "matches": [_brief(e) for _, e in hits],
+                "hint": "Pass match with a few words from the summary of "
+                        "the one to remove."}
+
+    index, entry = hits[0]
+    del lines[index]
+    remaining = [line for line in lines if line.strip()]
+    if remaining:
+        put_versioned(r2_client, BUCKET_NAME, key,
+                      ("\n".join(remaining) + "\n").encode("utf-8"), version,
+                      ContentType="application/x-ndjson")
+    else:
+        r2_client.delete_object(Bucket=BUCKET_NAME, Key=key)
+    return {"ok": True, "deleted": entry, "entries_left_that_day":
+            len(remaining)}
+
+
+def delete_log_entry(ts: str, match: str = None, journal: bool = False,
+                     client: str = None, user: dict = None) -> str:
+    """Remove one entry from the user's log, or from an agent's journal.
+
+    `ts` is the entry's timestamp exactly as get_log returned it. When two
+    entries share a timestamp, `match` (words from the summary) picks one.
+    Set journal=true to remove from an agent's journal instead -- yours by
+    default, or `client`'s. The removed entry is returned, so it can be
+    logged again if this was a mistake.
+    """
+    user_id = user["user_id"]
+    try:
+        when = parse_when(ts, "ts", tz=_user_zone(user_id)[0])
+    except LogError as e:
+        return json.dumps(e.payload)
+    if isinstance(ts, str) and len(ts.strip()) == 10:
+        return json.dumps({
+            "error": "ts must be a full timestamp, not a date.",
+            "hint": "Read the day with get_log(date=...) and pass the ts of "
+                    "the entry to remove."})
+    day = _day_str(when)
+
+    try:
+        if journal or client:
+            from joyverse.storage import invalidate_usage, pick_client
+
+            name, problem = pick_client(client, user)
+            if problem:
+                return json.dumps(problem)
+            out = _remove_entry(journal_key(user_id, name, day), day, when,
+                                (match or "").strip())
+            if out.get("ok"):
+                out["removed_from"] = f"journal of {name}"
+                invalidate_usage(user_id)
+        else:
+            out = _remove_entry(get_log_key(user_id, day), day, when,
+                                (match or "").strip())
+            if out.get("ok"):
+                out["removed_from"] = "user_log"
+    except ValueError as e:
+        return json.dumps({"error": f"Invalid argument: {e}"})
+    except Exception as e:
+        return json.dumps({"error": f"Could not delete: {e}"})
+    return json.dumps(out, indent=2)

@@ -152,7 +152,7 @@ async def route_request(
     # ==========================================
     elif method == "tools/list":
         result = {
-            "tools": [t.model_dump() for t in tool_schemas]
+            "tools": [t.model_dump(exclude_none=True) for t in tool_schemas]
         }
         payload = transport.build_jsonrpc_response(req_id, result)
         yield transport.format_sse(payload)

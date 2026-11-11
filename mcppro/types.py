@@ -21,6 +21,10 @@ class MCPToolDefinition(BaseModel):
     name: str
     description: str = ""
     inputSchema: Dict[str, Any] = Field(default_factory=dict)
+    # Behaviour hints (readOnlyHint, destructiveHint, idempotentHint,
+    # openWorldHint, title). A client uses them to decide what needs the
+    # user's confirmation; they are hints, never a security control.
+    annotations: Optional[Dict[str, Any]] = None
 
 
 class MCPServerInfo(BaseModel):

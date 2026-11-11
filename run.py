@@ -5,15 +5,18 @@ from joyverse.config import (
     READ_SCOPE, WRITE_SCOPE, SUPPORTED_SCOPES, resource_url,
 )
 from joyverse import config as jv_config
-from joyverse.profile import get_profile, update_profile
-from joyverse.bio import get_bio, update_bio
+from joyverse.profile import get_profile, update_profile, delete_profile_field
+from joyverse.bio import get_bio, update_bio, delete_bio_section
 from joyverse.memory import (
     get_memory, add_memory_trait, update_focus, add_observed_pattern,
-    update_preference, update_context,
+    update_preference, update_context, delete_memory_item,
 )
 from joyverse.data import (
-    get_data, list_topics, edit_data, replace_data, restore_data,
+    get_data, list_topics, edit_data, replace_data, restore_data, delete_data,
 )
+from joyverse.search import search
+from joyverse.account import whoami
+from joyverse.history import list_history, restore_version
 from joyverse.storage import (
     register_client, list_clients, save_file_from_url, save_file_text,
     get_file, list_files, delete_file,
@@ -21,6 +24,7 @@ from joyverse.storage import (
 from joyverse.uploads import save_file_base64
 from joyverse.logs import (
     add_to_log, get_log, list_log_days, add_to_agent_log, get_agent_log,
+    delete_log_entry,
 )
 from joyverse.prompts import build_instructions
 from joyverse import auth as jv_auth
@@ -87,17 +91,66 @@ server = MCPServer(
     max_body_bytes=jv_config.MAX_REQUEST_BYTES,
 )
 
+# Orientation
+server.tool(description=(
+    "Who is calling: the account, whether you may write, the client name the "
+    "server knows you by (`you_are`), the user's timezone and today's date "
+    "for them, and a count of what is stored. Call it once at the start of a "
+    "session instead of guessing your own name or the date."),
+    scopes=[READ_SCOPE])(whoami)
+
+server.tool(description=(
+    "Find something by content when you do not know where or when it was "
+    "stored. Searches the user's log, data topics, profile, bio, memory and "
+    "file names for the words in `query` (every word must appear; if nothing "
+    "has them all, entries with any of them are returned and the reply says "
+    "so). Use this BEFORE guessing a date for get_log or a topic for "
+    "get_data. Narrow with where (log, data, profile, bio, memory, files, "
+    "journals) and, for the log, since/until dates. Agents' journals are "
+    "searched only when where includes \"journals\" or is \"all\"."),
+    scopes=[READ_SCOPE],
+    param_docs={
+        "query": "A word or short phrase, e.g. 'pricing page' or 'graphs'.",
+        "where": "Areas to search. Leave out for everything except journals.",
+        "since": "Only log entries on or after this date (YYYY-MM-DD).",
+        "until": "Only log entries on or before this date (YYYY-MM-DD).",
+    })(search)
+
 # Profile
 server.tool(description="Get the user's personal profile",
             scopes=[READ_SCOPE])(get_profile)
 server.tool(description="Update a field in the user profile",
             scopes=[WRITE_SCOPE])(update_profile)
 
+server.tool(description=(
+    "DESTRUCTIVE: remove one `key: value` line or one whole `## Section` "
+    "from the profile. Only when the user asks for it to be removed. The "
+    "version before the removal is kept; restore_version brings it back."),
+    scopes=[WRITE_SCOPE])(delete_profile_field)
+
 # Bio
 server.tool(description="Get the user's detailed life narrative",
             scopes=[READ_SCOPE])(get_bio)
 server.tool(description="Write or replace a section of the user's bio",
             scopes=[WRITE_SCOPE])(update_bio)
+
+server.tool(description=(
+    "DESTRUCTIVE: remove one `## Section` of the bio, heading and body. Only "
+    "when the user asks. The version before the removal is kept; "
+    "restore_version brings it back."),
+    scopes=[WRITE_SCOPE])(delete_bio_section)
+
+# History for the three whole-document stores. Data topics have restore_data.
+server.tool(description=(
+    "List the earlier versions kept for a document: profile, bio or memory. "
+    "One is kept every time the document changes, the newest ten."),
+    scopes=[READ_SCOPE])(list_history)
+server.tool(description=(
+    "Undo a change to the profile, bio or memory by bringing back an earlier "
+    "version -- the most recent one unless you pass a `version` from "
+    "list_history. The version it replaces is kept too, so this can itself "
+    "be undone. For a data topic use restore_data instead."),
+    scopes=[WRITE_SCOPE])(restore_version)
 
 # Memory
 server.tool(description="Get the user's LLM memory model",
@@ -119,6 +172,13 @@ server.tool(description=(
     "Update the user's current context. field is one of main_focus, "
     "immediate_next (the next concrete step), mood."),
     scopes=[WRITE_SCOPE])(update_context)
+
+server.tool(description=(
+    "DESTRUCTIVE: remove one personality trait or observed pattern from "
+    "memory -- one that is wrong or no longer true. kind is 'trait' or "
+    "'pattern'; text is the entry, or enough of it to identify exactly one. "
+    "restore_version(document='memory') undoes it."),
+    scopes=[WRITE_SCOPE])(delete_memory_item)
 
 # Data Logs
 server.tool(description="Get structured data logs by topic (e.g., dsa, projects)",
@@ -156,6 +216,13 @@ server.tool(description=(
     "replaced. Use this when an edit_data or replace_data call went wrong. "
     "One level of undo: calling it again redoes the change."),
     scopes=[WRITE_SCOPE])(restore_data)
+
+server.tool(description=(
+    "DESTRUCTIVE: delete a whole data topic. Only when the user asks for the "
+    "topic to be removed -- to remove one item inside a topic use edit_data "
+    "with op=remove. The deleted log is kept as the topic's previous "
+    "version, so restore_data(topic) brings it back."),
+    scopes=[WRITE_SCOPE])(delete_data)
 
 
 # ==========================================
@@ -270,6 +337,20 @@ server.tool(description=(
     scopes=[READ_SCOPE])(list_log_days)
 
 server.tool(description=(
+    "DESTRUCTIVE: remove one entry from the user's log -- a mistake, a "
+    "duplicate, or something they want forgotten. Pass ts exactly as get_log "
+    "returned it; if two entries share that timestamp, add match with a few "
+    "words from the summary. Set journal=true to remove from your own "
+    "journal instead. The removed entry is returned in the reply."),
+    scopes=[WRITE_SCOPE],
+    param_docs={
+        "ts": "The entry's timestamp, exactly as get_log returned it.",
+        "match": "Words from the summary, when several entries share ts.",
+        "journal": "true to remove from an agent journal, not the user's log.",
+        "client": "Whose journal. Leave out for your own.",
+    })(delete_log_entry)
+
+server.tool(description=(
     "Get a temporary download link for a file you stored earlier. The link is "
     "signed and expires in 7 days; call again for a fresh one. Use this to "
     "read a file another client saved."),
@@ -284,6 +365,69 @@ server.tool(description=(
     "DESTRUCTIVE: permanently deletes a stored file and frees its space. There "
     "is no undo and no trash -- confirm with the user first."),
     scopes=[WRITE_SCOPE])(delete_file)
+
+
+# ==========================================
+# TOOL ANNOTATIONS
+#
+# Hints a client uses to decide what to run freely and what to confirm with
+# the user. Assigned from one table rather than at each registration, and
+# every tool must appear in it: a new tool with no classification fails at
+# start-up instead of being silently advertised as "might do anything".
+#
+# "Destructive" here means it removes or overwrites something the caller did
+# not name piece by piece. The update_* and edit tools replace one value and
+# keep the version they replaced, so they are not marked.
+# ==========================================
+
+_READ_ONLY = {
+    "whoami", "search", "get_profile", "get_bio", "get_memory", "get_data",
+    "list_topics", "list_history", "list_clients", "get_log", "get_agent_log",
+    "list_log_days", "get_file", "list_files",
+}
+_ADDITIVE = {
+    "add_memory_trait", "add_observed_pattern", "add_to_log",
+    "add_to_agent_log", "register_client",
+}
+_REPLACING = {
+    "update_profile", "update_bio", "update_focus", "update_preference",
+    "update_context", "edit_data", "restore_data", "restore_version",
+    "save_file_text", "save_file_base64", "save_file_from_url",
+}
+_DESTRUCTIVE = {
+    "replace_data", "delete_data", "delete_file", "delete_profile_field",
+    "delete_bio_section", "delete_memory_item", "delete_log_entry",
+}
+# Calling these twice with the same arguments leaves the same state.
+_IDEMPOTENT = (_REPLACING | _DESTRUCTIVE | {"register_client"}) - {
+    "edit_data", "restore_data", "restore_version"}
+# The only tool that reaches outside this server.
+_OPEN_WORLD = {"save_file_from_url"}
+
+
+def _annotate(tool_server):
+    unclassified = []
+    for schema in tool_server._tool_schemas:
+        name = schema.name
+        if name in _READ_ONLY:
+            hints = {"readOnlyHint": True}
+        elif name in _ADDITIVE | _REPLACING | _DESTRUCTIVE:
+            hints = {"readOnlyHint": False,
+                     "destructiveHint": name in _DESTRUCTIVE,
+                     "idempotentHint": name in _IDEMPOTENT}
+        else:
+            unclassified.append(name)
+            continue
+        hints["openWorldHint"] = name in _OPEN_WORLD
+        hints["title"] = name.replace("_", " ").capitalize()
+        schema.annotations = hints
+    if unclassified:
+        raise RuntimeError(
+            "Tools with no annotation class in run.py: "
+            + ", ".join(unclassified))
+
+
+_annotate(server)
 
 
 # ==========================================
