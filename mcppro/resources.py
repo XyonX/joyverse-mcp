@@ -35,6 +35,11 @@ class ResourceRegistry:
         self._readers: Dict[str, Callable] = {}
         self._templates: List[MCPResourceTemplate] = []
         self._prefix_readers: List[tuple] = []   # (prefix, reader, mime_type)
+        self._template_readers: Dict[str, Callable] = {}
+        # Scopes required to read, by exact URI, by template, and by prefix.
+        self._scopes: Dict[str, List[str]] = {}
+        self._template_scopes: Dict[str, List[str]] = {}
+        self._prefix_scopes: Dict[str, List[str]] = {}
         # Optional hook: called per request to contribute live resources,
         # e.g. one entry per record the caller actually owns.
         self._lister: Optional[Callable] = None
@@ -60,7 +65,6 @@ class ResourceRegistry:
             annotations=_annotations(priority, audience, last_modified),
         )
         self._readers[uri] = reader
-        self._scopes = getattr(self, "_scopes", {})
         self._scopes[uri] = list(scopes or [])
 
     def add_template(self, uri_template: str, reader: Callable, *,
@@ -79,16 +83,13 @@ class ResourceRegistry:
             mimeType=mime_type,
             annotations=_annotations(priority, audience, last_modified),
         ))
-        self._template_readers = getattr(self, "_template_readers", {})
         self._template_readers[uri_template] = reader
-        self._template_scopes = getattr(self, "_template_scopes", {})
         self._template_scopes[uri_template] = list(scopes or [])
 
     def add_prefix_reader(self, prefix: str, reader: Callable, *,
                           mime_type: str = "text/plain",
                           scopes: Optional[List[str]] = None):
         self._prefix_readers.append((prefix, reader, mime_type))
-        self._prefix_scopes = getattr(self, "_prefix_scopes", {})
         self._prefix_scopes[prefix] = list(scopes or [])
 
     def set_lister(self, lister: Callable):
@@ -121,12 +122,12 @@ class ResourceRegistry:
         return list(self._templates)
 
     def required_scopes(self, uri: str) -> List[str]:
-        scopes = getattr(self, "_scopes", {})
+        scopes = self._scopes
         if uri in scopes:
             return scopes[uri]
-        tscopes = getattr(self, "_template_scopes", {})
-        pscopes = getattr(self, "_prefix_scopes", {})
-        for template, reader in getattr(self, "_template_readers", {}).items():
+        tscopes = self._template_scopes
+        pscopes = self._prefix_scopes
+        for template, reader in self._template_readers.items():
             if _matches_template(uri, template):
                 return tscopes.get(template, [])
         for prefix, _, _ in self._prefix_readers:
@@ -143,7 +144,7 @@ class ResourceRegistry:
         if uri in self._readers:
             return self._readers[uri], self._resources[uri].mimeType or "text/plain"
 
-        for template, reader in getattr(self, "_template_readers", {}).items():
+        for template, reader in self._template_readers.items():
             if _matches_template(uri, template):
                 tpl = next((t for t in self._templates
                             if t.uriTemplate == template), None)

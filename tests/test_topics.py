@@ -156,7 +156,7 @@ class TestGetDataStillWorks:
         assert out["summary"] == "Deep mobile gaming history"
 
     def test_update_then_list(self, fake_r2):
-        dat.update_data("reading", json.dumps({"summary": "two books"}), USER)
+        dat.replace_data("reading", json.dumps({"summary": "two books"}), user=USER)
         out = json.loads(dat.list_topics(USER))
         assert out["topics"][0]["topic"] == "reading"
         assert out["topics"][0]["description"] == "two books"

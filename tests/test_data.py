@@ -27,34 +27,34 @@ class TestGetData:
         json.loads(dat.get_data("anything", USER))
 
 
-class TestUpdateData:
+class TestReplaceDataBasics:
     def test_writes_parsed_json(self, fake_r2):
-        out = dat.update_data("dsa", '{"done": 5}', USER)
-        assert "Updated" in out
+        out = dat.replace_data("dsa", '{"done": 5}', user=USER)
+        assert "Replaced" in out
         assert fake_r2.get_json(KEY) == {"done": 5}
 
     def test_reformats_input_json(self, fake_r2):
-        dat.update_data("dsa", '{"b":2,"a":1}', USER)
+        dat.replace_data("dsa", '{"b":2,"a":1}', user=USER)
         assert "\n" in fake_r2.store[KEY].decode()  # indent=2
 
     def test_writes_json_content_type(self, fake_r2):
-        dat.update_data("dsa", '{"a":1}', USER)
+        dat.replace_data("dsa", '{"a":1}', user=USER)
         assert fake_r2.puts[0]["ContentType"] == "application/json"
 
     def test_invalid_json_is_rejected(self, fake_r2):
-        out = dat.update_data("dsa", "{not json", USER)
+        out = dat.replace_data("dsa", "{not json", user=USER)
         assert "Invalid JSON" in out
         assert fake_r2.puts == []
 
     def test_json_array_is_accepted(self, fake_r2):
-        dat.update_data("dsa", '[1,2]', USER)
+        dat.replace_data("dsa", '[1,2]', user=USER)
         assert fake_r2.get_json(KEY) == [1, 2]
 
     def test_write_failure_is_reported(self, fake_r2, monkeypatch):
         def boom(**kw):
             raise Exception("network down")
         monkeypatch.setattr(fake_r2, "put_object", boom)
-        assert "Error" in dat.update_data("dsa", '{"a":1}', USER)
+        assert "Error" in dat.replace_data("dsa", '{"a":1}', user=USER)
 
 
 class TestTopicTraversalRegression:
@@ -67,20 +67,21 @@ class TestTopicTraversalRegression:
         assert "error" in json.loads(out) or "SECRET" not in out
 
     def test_traversal_topic_cannot_write_outside(self, fake_r2):
-        out = dat.update_data("../../../victim", '{"pwned":1}', USER)
+        out = dat.replace_data("../../../victim", '{"pwned":1}', user=USER)
         assert "Error" in out
         assert not any("victim" in p["Key"] for p in fake_r2.puts)
 
     def test_slash_topic_rejected(self, fake_r2):
-        assert "Error" in dat.update_data("a/b", '{"x":1}', USER)
+        assert "Error" in dat.replace_data("a/b", '{"x":1}', user=USER)
 
     def test_normal_topic_still_works(self, fake_r2):
-        assert "Updated" in dat.update_data("dsa", '{"a":1}', USER)
+        assert "Replaced" in dat.replace_data("dsa", '{"a":1}', user=USER)
 
 
 class TestUserIsolation:
     def test_topics_are_namespaced_per_user(self, fake_r2):
-        dat.update_data("dsa", '{"who":"alice"}', {"user_id": "u_0a1b2c3d4e5f"})
-        dat.update_data("dsa", '{"who":"bob"}', USER)
+        dat.replace_data("dsa", '{"who":"alice"}',
+                         user={"user_id": "u_0a1b2c3d4e5f"})
+        dat.replace_data("dsa", '{"who":"bob"}', user=USER)
         assert fake_r2.get_json("users/u_0a1b2c3d4e5f/data/dsa/progress.json") == {"who": "alice"}
         assert fake_r2.get_json(KEY) == {"who": "bob"}

@@ -120,13 +120,3 @@ def resolve_file_path(user_id: str, client: str, path: str) -> Tuple[str, str]:
         raise ValueError("Resolved path escaped the client folder.")
 
     return normalised_key, relative
-
-
-def is_inside_storage(user_id: str, key: str) -> bool:
-    """True when `key` sits under this user's storage root.
-
-    Used when listing or reading, so a crafted key cannot read outside.
-    """
-    root = storage_prefix(user_id)
-    normalised = posixpath.normpath(key)
-    return normalised.startswith(root) and ".." not in normalised.split("/")

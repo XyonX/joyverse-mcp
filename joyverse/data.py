@@ -329,27 +329,6 @@ def get_data(topic: str, user: dict) -> str:
         return json.dumps({"error": f"R2 error: {str(e)}"})
 
 
-def update_data(topic: str, data: str, user: dict) -> str:
-    user_id = user["user_id"]
-    try:
-        key = get_data_key(user_id, topic)
-    except ValueError as e:
-        return f"Error: Invalid topic: {e}"
-    try:
-        parsed = json.loads(data)
-        r2_client.put_object(
-            Bucket=BUCKET_NAME,
-            Key=key,
-            Body=json.dumps(parsed, indent=2).encode("utf-8"),
-            ContentType="application/json"
-        )
-        return f"Updated data for {topic}"
-    except json.JSONDecodeError:
-        return "Error: Invalid JSON data"
-    except Exception as e:
-        return f"Error writing to R2: {str(e)}"
-
-
 # ==========================================
 # GRANULAR EDITING
 # ==========================================
