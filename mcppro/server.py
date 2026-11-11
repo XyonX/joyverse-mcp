@@ -1,6 +1,7 @@
 from fastapi import FastAPI, Request, Depends
 from fastapi.responses import StreamingResponse, JSONResponse
 from typing import Callable, Dict, Any, Iterable, Optional
+import json
 import uvicorn
 
 from mcppro.auth import no_auth
@@ -18,8 +19,13 @@ class MCPServer:
     
     def __init__(self, name: str, version: str = "1.0.0", auth: Callable = None,
                  instructions: str = "", extra_routes: Iterable = None,
-                 resource_url: Optional[str] = None):
+                 resource_url: Optional[str] = None,
+                 max_body_bytes: Optional[int] = 32 * 1024 * 1024):
         self.name = name
+        # Largest request body /mcp will read. Without a cap a single request
+        # can make the server buffer an arbitrary amount of memory before any
+        # tool gets a chance to refuse it. None disables the check.
+        self._max_body_bytes = max_body_bytes
         self.version = version
         self.instructions = instructions or ""
         
@@ -161,9 +167,28 @@ class MCPServer:
         async def handle_mcp(request: Request, user: dict = Depends(self._auth_dependency)):
             """The single MCP V2 endpoint."""
             
-            # 1. Parse JSON-RPC request
+            # 1. Read the body with a hard cap. The declared length is checked
+            #    first so an honest oversized request is refused before a byte
+            #    is read; the running count catches a chunked body that
+            #    declares nothing.
+            limit = self._max_body_bytes
+            too_large = JSONResponse(
+                {"jsonrpc": "2.0", "id": None,
+                 "error": {"code": -32600, "message": "Request body too large"}},
+                status_code=413)
+            declared = request.headers.get("content-length", "")
+            if limit and declared.isdigit() and int(declared) > limit:
+                return too_large
+            chunks, size = [], 0
+            async for chunk in request.stream():
+                size += len(chunk)
+                if limit and size > limit:
+                    return too_large
+                chunks.append(chunk)
+
+            # 2. Parse JSON-RPC request
             try:
-                body = await request.json()
+                body = json.loads(b"".join(chunks))
             except Exception:
                 return {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}
             

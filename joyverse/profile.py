@@ -1,5 +1,10 @@
 import json
-from joyverse.config import r2_client, BUCKET_NAME, get_profile_key
+from joyverse.atomic import (
+    Conflict, get_versioned, put_versioned, retry_on_conflict,
+)
+from joyverse.config import (
+    r2_client, BUCKET_NAME, get_profile_key, ensure_doc_size,
+)
 
 def get_profile(user: dict) -> str:
     """Reads the user profile from R2."""
@@ -19,6 +24,7 @@ def get_profile(user: dict) -> str:
                           f"Create one with update_profile."})
         return json.dumps({"error": f"R2 error: {str(e)}"})
 
+@retry_on_conflict
 def update_profile(field: str, value: str, user: dict) -> str:
     """Writes or updates a field in the profile on R2.
 
@@ -34,15 +40,12 @@ def update_profile(field: str, value: str, user: dict) -> str:
         return f"Error: Invalid user_id: {e}"
 
     try:
-        response = r2_client.get_object(Bucket=BUCKET_NAME, Key=key)
-        content = response["Body"].read().decode("utf-8")
+        raw, version = get_versioned(r2_client, BUCKET_NAME, key)
     except Exception as e:
-        if "NoSuchKey" in str(e):
-            # No profile yet -- seed one and fall through so the first call
-            # creates it instead of failing.
-            content = "# User Profile\n"
-        else:
-            return f"Error: R2 error: {str(e)}"
+        return f"Error: R2 error: {str(e)}"
+    # No profile yet -- seed one and fall through so the first call creates
+    # it instead of failing.
+    content = raw.decode("utf-8") if raw is not None else "# User Profile\n"
 
     field = field.strip()
     if not field:
@@ -107,13 +110,17 @@ def update_profile(field: str, value: str, user: dict) -> str:
         new_content = "\n".join(lines)
         result_msg = f"Updated {field} to: {value}"
 
+    body = new_content.encode("utf-8")
     try:
-        r2_client.put_object(
-            Bucket=BUCKET_NAME,
-            Key=key,
-            Body=new_content.encode("utf-8"),
-            ContentType="text/markdown"
-        )
+        ensure_doc_size(body, "profile")
+    except ValueError as e:
+        return f"Error: {e}"
+
+    try:
+        put_versioned(r2_client, BUCKET_NAME, key, body, version,
+                      ContentType="text/markdown")
         return result_msg
+    except Conflict:
+        raise
     except Exception as e:
         return f"Error writing to R2: {str(e)}"

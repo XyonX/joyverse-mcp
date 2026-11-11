@@ -69,6 +69,12 @@ class _R2ClientProxy:
     def delete_objects(self, **kwargs):
         return get_r2_client().delete_objects(**kwargs)
 
+    def upload_fileobj(self, *args, **kwargs):
+        # Managed transfer: splits a stream into multipart parts, each of
+        # which is buffered and so can be retried. put_object cannot do either
+        # for a body that is not seekable.
+        return get_r2_client().upload_fileobj(*args, **kwargs)
+
 r2_client = _R2ClientProxy()
 
 # ==========================================
@@ -224,9 +230,37 @@ MAX_USER_BYTES = _env_int("JOYVERSE_MAX_USER_GB", 50) * GB
 # through the model, which does not exist yet.
 MAX_INLINE_BYTES = _env_int("JOYVERSE_MAX_INLINE_MB", 8) * MB
 
-# Guards for server-side URL fetches.
+# Guards for server-side URL fetches. FETCH_TIMEOUT_SECONDS bounds each
+# socket operation; FETCH_TOTAL_SECONDS bounds the whole download, because a
+# host that trickles one byte at a time never trips the per-operation timeout.
 FETCH_TIMEOUT_SECONDS = _env_int("JOYVERSE_FETCH_TIMEOUT", 30)
+FETCH_TOTAL_SECONDS = _env_int("JOYVERSE_FETCH_TOTAL_TIMEOUT", 600)
 MAX_REDIRECTS = 5
+
+# Largest text document a single write may produce: a data topic, the profile,
+# the bio, the memory model, or a save_file_text body. These pass through the
+# model, so anything near this size is a mistake or abuse rather than real use.
+MAX_DOC_BYTES = _env_int("JOYVERSE_MAX_DOC_MB", 2) * MB
+
+# Largest HTTP request body /mcp accepts. Must leave room for a base64 upload
+# of MAX_INLINE_BYTES (base64 inflates by a third) plus the JSON around it.
+MAX_REQUEST_BYTES = max(_env_int("JOYVERSE_MAX_REQUEST_MB", 16) * MB,
+                        MAX_INLINE_BYTES * 3 // 2)
+
+# Read-modify-write updates are guarded with If-Match / If-None-Match so two
+# concurrent writers cannot silently overwrite each other. Only turn this off
+# for a storage backend that rejects conditional PutObject headers.
+CONDITIONAL_WRITES = os.getenv("JOYVERSE_CONDITIONAL_WRITES", "true").strip(
+    ).lower() not in ("0", "false", "no", "off")
+
+
+def ensure_doc_size(body: bytes, what: str = "document"):
+    """Refuse a text document that has grown past MAX_DOC_BYTES."""
+    if len(body) > MAX_DOC_BYTES:
+        raise ValueError(
+            f"The {what} would be {round(len(body) / MB, 2)} MB, over the "
+            f"{MAX_DOC_BYTES // MB} MB limit for a single document. Split it "
+            "into smaller pieces, or store large content as a file.")
 
 # Conversation logs are stored one object per day, named by date. Validated
 # here because the date is user-supplied and becomes a key segment.

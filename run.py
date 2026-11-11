@@ -74,6 +74,7 @@ server = MCPServer(
     auth=build_auth(),                    # OAuth first, then bearer
     extra_routes=build_discovery_routes(),
     resource_url=_RESOURCE_URL,
+    max_body_bytes=jv_config.MAX_REQUEST_BYTES,
 )
 
 # Profile

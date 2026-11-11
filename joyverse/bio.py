@@ -1,5 +1,10 @@
 import json
-from joyverse.config import r2_client, BUCKET_NAME, get_bio_key
+from joyverse.atomic import (
+    Conflict, get_versioned, put_versioned, retry_on_conflict,
+)
+from joyverse.config import (
+    r2_client, BUCKET_NAME, get_bio_key, ensure_doc_size,
+)
 
 
 def get_bio(user: dict) -> str:
@@ -20,6 +25,7 @@ def get_bio(user: dict) -> str:
         return json.dumps({"error": f"R2 error: {str(e)}"})
 
 
+@retry_on_conflict
 def update_bio(section: str, content: str, user: dict) -> str:
     """Writes or replaces a `## Section` block in the user's biography.
 
@@ -43,14 +49,11 @@ def update_bio(section: str, content: str, user: dict) -> str:
         return "Error: Section name cannot be empty."
 
     try:
-        response = r2_client.get_object(Bucket=BUCKET_NAME, Key=key)
-        content_existing = response["Body"].read().decode("utf-8")
+        raw, version = get_versioned(r2_client, BUCKET_NAME, key)
     except Exception as e:
-        if "NoSuchKey" in str(e):
-            # No bio yet -- create one with just this section.
-            content_existing = ""
-        else:
-            return f"Error: R2 error: {str(e)}"
+        return f"Error: R2 error: {str(e)}"
+    # No bio yet -- create one with just this section.
+    content_existing = raw.decode("utf-8") if raw is not None else ""
 
     lines = content_existing.split("\n")
     header = f"## {section}"
@@ -84,13 +87,17 @@ def update_bio(section: str, content: str, user: dict) -> str:
         new_content = "\n".join(new_lines)
         action = f"Updated section '{section}'"
 
+    body = new_content.encode("utf-8")
     try:
-        r2_client.put_object(
-            Bucket=BUCKET_NAME,
-            Key=key,
-            Body=new_content.encode("utf-8"),
-            ContentType="text/markdown"
-        )
+        ensure_doc_size(body, "bio")
+    except ValueError as e:
+        return f"Error: {e}"
+
+    try:
+        put_versioned(r2_client, BUCKET_NAME, key, body, version,
+                      ContentType="text/markdown")
         return f"{action} ({len(content)} chars)"
+    except Conflict:
+        raise
     except Exception as e:
         return f"Error writing to R2: {str(e)}"

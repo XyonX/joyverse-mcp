@@ -8,6 +8,7 @@ token's user_id. Registering as "chatgpt" therefore reaches only your own
 files, never anyone else's, whether or not that name was free to claim.
 """
 import hashlib
+import http.client
 import ipaddress
 import json
 import socket
@@ -18,9 +19,10 @@ import urllib.request
 from typing import Dict, List, Optional
 from urllib.parse import urlparse
 
+from joyverse.atomic import get_versioned, put_versioned, retry_on_conflict
 from joyverse.config import (
     MAX_FILE_BYTES, MAX_USER_BYTES, FETCH_TIMEOUT_SECONDS, MAX_REDIRECTS,
-    BUCKET_NAME, MB, GB, STORAGE_ROOT,
+    BUCKET_NAME, MB, GB, STORAGE_ROOT, FETCH_TOTAL_SECONDS, MAX_DOC_BYTES,
 )
 from joyverse.paths import (
     client_prefix, normalise_client_name, resolve_file_path, storage_prefix,
@@ -90,26 +92,28 @@ def _too_big(size: int):
 # CLIENT REGISTRY
 # ==========================================
 
+def _load_clients_versioned(user_id: str) -> tuple:
+    from joyverse.config import r2_client
+
+    raw, version = get_versioned(r2_client, BUCKET_NAME, clients_key(user_id))
+    if raw is None:
+        return {"clients": {}}, version
+    return json.loads(raw.decode("utf-8")), version
+
+
 def _load_clients(user_id: str) -> dict:
+    return _load_clients_versioned(user_id)[0]
+
+
+def _save_clients(user_id: str, data: dict, version=None):
     from joyverse.config import r2_client
 
-    try:
-        body = r2_client.get_object(Bucket=BUCKET_NAME, Key=clients_key(user_id))
-        return json.loads(body["Body"].read().decode("utf-8"))
-    except Exception as e:
-        if "NoSuchKey" in str(e) or "does not exist" in str(e):
-            return {"clients": {}}
-        raise
+    put_versioned(r2_client, BUCKET_NAME, clients_key(user_id),
+                  json.dumps(data, indent=2).encode("utf-8"), version,
+                  ContentType="application/json")
 
 
-def _save_clients(user_id: str, data: dict):
-    from joyverse.config import r2_client
-
-    r2_client.put_object(Bucket=BUCKET_NAME, Key=clients_key(user_id),
-                          Body=json.dumps(data, indent=2).encode("utf-8"),
-                          ContentType="application/json")
-
-
+@retry_on_conflict
 def register_client(name: str, platform: Optional[str] = None,
                     user: dict = None) -> str:
     """Register a client name for this user. Returns the storage root path.
@@ -124,7 +128,7 @@ def register_client(name: str, platform: Optional[str] = None,
     except ValueError as e:
         return json.dumps({"error": f"Invalid client name: {e}"})
 
-    registry = _load_clients(user_id)
+    registry, version = _load_clients_versioned(user_id)
     existing = registry["clients"].get(clean)
     if existing:
         return json.dumps({
@@ -157,7 +161,7 @@ def register_client(name: str, platform: Optional[str] = None,
         "platform": clean_platform,
         "first_seen": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
-    _save_clients(user_id, registry)
+    _save_clients(user_id, registry, version)
 
     return json.dumps({
         "ok": True,
@@ -300,17 +304,32 @@ def _validate_url(url: str):
     if not host:
         raise StorageError({"error": "URL has no host"})
 
+    _public_addresses(host, parsed.port or
+                      (443 if parsed.scheme == "https" else 80))
+    return parsed
+
+
+def _public_addresses(host: str, port: int) -> List[str]:
+    """Resolve `host` and return its addresses, refusing any non-public one.
+
+    Every address is checked, not just the first: a name that resolves to one
+    public and one private address is rejected outright.
+    """
     try:
-        infos = socket.getaddrinfo(host, parsed.port or
-                                   (443 if parsed.scheme == "https" else 80),
-                                   proto=socket.IPPROTO_TCP)
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
     except socket.gaierror:
         raise StorageError({"error": f"Could not resolve host: {host}"})
 
+    addresses = []
     for info in infos:
-        addr = ipaddress.ip_address(info[4][0])
-        if addr.is_loopback or addr.is_link_local or addr.is_private \
-                or addr.is_reserved or addr.is_multicast or addr.is_unspecified:
+        # Strip an IPv6 zone id ("fe80::1%en0") before parsing.
+        text = info[4][0].split("%", 1)[0]
+        addr = ipaddress.ip_address(text)
+        blocked = (addr.is_loopback or addr.is_link_local or addr.is_private
+                   or addr.is_reserved or addr.is_multicast
+                   or addr.is_unspecified
+                   or any(addr in net for net in _BLOCKED_NETWORKS))
+        if blocked:
             raise StorageError({
                 "error": "Refusing to fetch a non-public address",
                 "host": host,
@@ -318,16 +337,59 @@ def _validate_url(url: str):
                 "hint": "Loopback, private and link-local addresses are "
                         "blocked to prevent internal network access.",
             })
-        for net in _BLOCKED_NETWORKS:
-            if addr in net:
-                raise StorageError({
-                    "error": "Refusing to fetch a non-public address",
-                    "host": host,
-                    "address": str(addr),
-                    "hint": "Loopback, private and link-local addresses are "
-                            "blocked to prevent internal network access.",
-                })
-    return parsed
+        addresses.append(text)
+    if not addresses:
+        raise StorageError({"error": f"Could not resolve host: {host}"})
+    return addresses
+
+
+# ------------------------------------------
+# Connections pinned to a checked address
+#
+# Validating a URL and then handing the hostname to the HTTP library resolves
+# the name twice. A hostile DNS server answers the first lookup with a public
+# address and the second with 127.0.0.1 or the cloud metadata address, and the
+# check has passed for a host that is never contacted. These connections
+# resolve once, check the result, and connect to that exact address. TLS still
+# verifies the certificate against the hostname.
+# ------------------------------------------
+
+def _connect_checked(host: str, port: int, timeout, source_address):
+    last_error = None
+    for address in _public_addresses(host, port):
+        try:
+            if timeout is socket._GLOBAL_DEFAULT_TIMEOUT:
+                return socket.create_connection(
+                    (address, port), source_address=source_address)
+            return socket.create_connection(
+                (address, port), timeout, source_address)
+        except OSError as e:
+            last_error = e
+    raise last_error
+
+
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def connect(self):
+        self.sock = _connect_checked(self.host, self.port, self.timeout,
+                                     self.source_address)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def connect(self):
+        sock = _connect_checked(self.host, self.port, self.timeout,
+                                self.source_address)
+        self.sock = self._context.wrap_socket(sock, server_hostname=self.host)
+
+
+class _PinnedHTTPHandler(urllib.request.HTTPHandler):
+    def http_open(self, req):
+        return self.do_open(_PinnedHTTPConnection, req)
+
+
+class _PinnedHTTPSHandler(urllib.request.HTTPSHandler):
+    def https_open(self, req):
+        return self.do_open(_PinnedHTTPSConnection, req,
+                            context=self._context)
 
 
 class _NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -343,7 +405,11 @@ def _open(url: str, timeout: int = FETCH_TIMEOUT_SECONDS, method: str = "GET"):
     `method` matters for correctness, not just politeness: probe_url must send
     HEAD, or it downloads the entire body just to learn the size.
     """
-    opener = urllib.request.build_opener(_NoRedirect)
+    # ProxyHandler({}) disables environment proxies: through a proxy the
+    # address check would apply to the proxy, not to the real destination.
+    opener = urllib.request.build_opener(
+        urllib.request.ProxyHandler({}), _NoRedirect,
+        _PinnedHTTPHandler, _PinnedHTTPSHandler)
     current = url
     for _ in range(MAX_REDIRECTS + 1):
         _validate_url(current)
@@ -356,6 +422,7 @@ def _open(url: str, timeout: int = FETCH_TIMEOUT_SECONDS, method: str = "GET"):
                 raise StorageError({
                     "error": f"Could not fetch URL (HTTP {e.code})",
                     "url": current,
+                    "http_status": e.code,
                 })
             location = e.headers.get("Location")
             if not location:
@@ -386,45 +453,73 @@ def probe_url(url: str) -> tuple:
 class _StreamReader:
     """File-like wrapper so the HTTP body streams straight into R2.
 
-    boto3 accepts a readable stream as Body and uploads it in multipart
-    chunks. The previous version accumulated every chunk in a list and joined
-    it, so a 500 MB file was held in memory in full -- and the docstring claimed
-    otherwise.
+    The managed uploader (upload_fileobj) pulls from this in part-sized
+    reads and uploads each part separately, so memory stays bounded however
+    large the file is. It decides "this is the whole file" from a read that
+    comes back short, so read(n) must return exactly n bytes until the source
+    is exhausted -- a short read mid-stream would truncate the file.
     """
 
-    def __init__(self, resp, limit: int):
+    CHUNK = 1024 * 256
+
+    def __init__(self, resp, limit: int, deadline: float = None,
+                 reason: str = "File too large"):
         self._resp = resp
         self._limit = limit
-        self._read = 0
-        self._primed = None
+        self._deadline = deadline
+        self._reason = reason
+        self._read = 0          # bytes pulled from the source so far
+        self._buffer = b""      # pulled but not yet handed to the uploader
+        self._eof = False
 
-    def read(self, size=-1):
-        # The emptiness check primes the stream, and the caller has already
-        # consumed that chunk. Returning it again is what keeps the uploaded
-        # bytes identical to the source -- without this the first chunk was
-        # silently dropped and every file was truncated by up to 256 KB.
-        if self._primed is not None:
-            chunk, self._primed = self._primed, None
-            return chunk
-        chunk = self._resp.read(1024 * 256 if size is None or size < 0 else size)
+    def _pull(self, size: int) -> bytes:
+        # The socket timeout only bounds one read. A host that sends a byte
+        # every few seconds never trips it, so the whole transfer has its own
+        # deadline.
+        if self._deadline is not None and time.monotonic() > self._deadline:
+            raise StorageError({
+                "error": "Download took too long",
+                "limit_seconds": FETCH_TOTAL_SECONDS,
+                "detail": "Stopped mid-download; nothing was stored.",
+            })
+        chunk = self._resp.read(size)
         self._read += len(chunk)
         if self._read > self._limit:
             raise StorageError({
-                "error": "File too large",
-                "limit_mb": self._limit // MB,
+                "error": self._reason,
+                "limit_mb": round(self._limit / MB, 1),
                 "detail": "Stopped mid-download; nothing was stored.",
             })
         return chunk
 
+    def read(self, size=-1):
+        want = self.CHUNK if size is None or size < 0 else size
+        parts = [self._buffer[:want]]
+        self._buffer = self._buffer[want:]
+        have = len(parts[0])
+        while have < want and not self._eof:
+            chunk = self._pull(min(want - have, self.CHUNK))
+            if not chunk:
+                self._eof = True
+                break
+            parts.append(chunk)
+            have += len(chunk)
+        return b"".join(parts)
+
     def prime(self):
-        """Read once to detect an empty body, keeping the chunk for R2."""
-        self._primed = self.read()
-        return bool(self._primed)
+        """Read once to detect an empty body, keeping the bytes for R2."""
+        self._buffer = self.read()
+        return bool(self._buffer)
 
 
 def fetch_to_r2(url: str, key: str, metadata: dict,
-                max_bytes: int = MAX_FILE_BYTES):
-    """Stream a URL straight into R2 without buffering the file in memory."""
+                max_bytes: int = MAX_FILE_BYTES,
+                limit_reason: str = "File too large"):
+    """Stream a URL straight into R2 without buffering the file in memory.
+
+    `max_bytes` is enforced on the bytes actually received, so it holds even
+    when the host declares no Content-Length or declares a false one.
+    """
     from joyverse.config import r2_client
 
     resp, final = _open(url)
@@ -446,13 +541,20 @@ def fetch_to_r2(url: str, key: str, metadata: dict,
         })
 
     try:
-        reader = _StreamReader(resp, max_bytes)
+        reader = _StreamReader(
+            resp, max_bytes,
+            deadline=time.monotonic() + FETCH_TOTAL_SECONDS,
+            reason=limit_reason)
         if not reader.prime():
             raise StorageError({"error": "URL returned an empty body",
                                 "url": final})
-        r2_client.put_object(
-            Bucket=BUCKET_NAME, Key=key, Body=reader,
-            ContentType=mime, Metadata=metadata)
+        # upload_fileobj rather than put_object: put_object needs a seekable
+        # body to retry and sends it as one request, while the managed
+        # uploader buffers one part at a time, retries a failed part, and
+        # aborts the multipart upload if the stream raises.
+        r2_client.upload_fileobj(
+            reader, BUCKET_NAME, key,
+            ExtraArgs={"ContentType": mime, "Metadata": metadata})
         written = reader._read
     except StorageError:
         resp.close()
@@ -507,12 +609,32 @@ def save_file_from_url(url: str, path: str, client: str = None,
         # HEAD first: reject an oversized or wrong-typed file before pulling
         # a single byte of its body.
         replacing = existing_size(key)
-        size, mime, final_url = probe_url(url)
-        if size is not None:
-            check_capacity(user_id, size, replacing)
+        try:
+            size, mime, final_url = probe_url(url)
+        except StorageError as e:
+            # Plenty of hosts answer GET but refuse HEAD -- a presigned link
+            # is signed for one method only. That is not a reason to fail;
+            # carry on without the early size check. Anything else (a blocked
+            # address, an unresolvable host) is still fatal.
+            if "http_status" not in e.payload:
+                raise
+            size, mime = None, None
+
+        # How much this user can still store. Applied to the bytes actually
+        # received, because the HEAD answer is only a claim: it may be absent,
+        # and it is not binding on the GET that follows.
+        used = check_capacity(user_id, size or 0, replacing)
+        room = MAX_USER_BYTES - used + replacing
+        if room <= 0:
+            _over_limit("user", used, MAX_USER_BYTES, size or 0,
+                        "Your storage is full.")
+        cap, reason = MAX_FILE_BYTES, "File too large"
+        if room < cap:
+            cap, reason = room, "Storage limit reached"
 
         resp_meta = _meta(client, source=url, mime=mime)
-        written, mime, final_url = fetch_to_r2(url, key, resp_meta)
+        written, mime, final_url = fetch_to_r2(
+            url, key, resp_meta, max_bytes=cap, limit_reason=reason)
         invalidate_usage(user_id)
     except StorageError as e:
         return json.dumps(e.payload)
@@ -547,6 +669,16 @@ def save_file_text(path: str, content: str, client: str = None,
 
     body = content.encode("utf-8")
     try:
+        # Text arrives through the model, so a body this large is not a real
+        # document. Bigger content belongs behind a URL.
+        if len(body) > MAX_DOC_BYTES:
+            raise StorageError({
+                "error": "Text too large",
+                "size_mb": round(len(body) / MB, 2),
+                "limit_mb": MAX_DOC_BYTES // MB,
+                "hint": "Host the content at a URL and use "
+                        "save_file_from_url instead.",
+            })
         check_capacity(user_id, len(body), existing_size(key))
         r2_client.put_object(
             Bucket=BUCKET_NAME, Key=key, Body=body,

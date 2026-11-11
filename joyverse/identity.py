@@ -27,8 +27,10 @@ objects "at once" when only a single-key write is actually atomic.
 import json
 import re
 import secrets
-from datetime import datetime
+import time
+from datetime import datetime, timezone
 
+from joyverse.atomic import get_versioned, put_versioned, retry_on_conflict
 from joyverse.config import r2_client, BUCKET_NAME
 
 # user_id is always "u_" + 12 lowercase hex chars.
@@ -113,31 +115,68 @@ def normalise_handle(handle) -> str:
 # ==========================================
 
 def _now() -> str:
-    return datetime.now().strftime("%Y-%m-%dT%H:%M:%SZ")
+    # UTC, because the string is labelled "Z".
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _load() -> dict:
-    """Read the registry, or return an empty one.
+def _load_versioned() -> tuple:
+    """Read the registry and the version a later write must still match.
 
     A missing key is distinguished from a real R2 failure: a transport error
     must not be silently read as "no users exist yet".
     """
-    try:
-        body = r2_client.get_object(Bucket=BUCKET_NAME, Key=REGISTRY_KEY)
-        return json.loads(body["Body"].read().decode("utf-8"))
-    except Exception as e:
-        if "NoSuchKey" in str(e) or "404" in str(e):
-            return {"users": {}, "handles": {}, "identities": {}, "emails": {}}
-        raise
+    raw, version = get_versioned(r2_client, BUCKET_NAME, REGISTRY_KEY)
+    registry = json.loads(raw.decode("utf-8")) if raw else {}
+    for table in ("users", "handles", "identities", "emails"):
+        registry.setdefault(table, {})
+    return registry, version
 
 
-def _save(registry: dict):
-    r2_client.put_object(
-        Bucket=BUCKET_NAME,
-        Key=REGISTRY_KEY,
-        Body=json.dumps(registry, indent=2).encode("utf-8"),
+def _load() -> dict:
+    """Read the registry, or return an empty one."""
+    return _load_versioned()[0]
+
+
+def _save(registry: dict, version=None):
+    """Write the registry back.
+
+    Every account lives in this one object, so an unguarded write here is the
+    most damaging lost update in the system: two people signing in for the
+    first time at once would each write a registry that lacks the other, and
+    whoever lost would be given a second, empty account on their next
+    request. Passing the `version` from _load_versioned makes the write fail
+    instead, and the caller's retry redoes it against the fresh registry.
+    """
+    put_versioned(
+        r2_client, BUCKET_NAME, REGISTRY_KEY,
+        json.dumps(registry, indent=2).encode("utf-8"), version,
         ContentType="application/json",
     )
+
+
+# ==========================================
+# LOOKUP CACHE
+# ==========================================
+# Authentication resolves an identity on every request, and the answer never
+# changes once it exists: a handle or (issuer, sub) maps to one user_id for
+# good. Remembering resolved mappings means a known caller costs no R2 read.
+# Only hits are cached -- an unknown identity always goes to the registry, so
+# a new account is visible immediately. The TTL bounds how long a mapping
+# removed by hand in R2 keeps resolving.
+_LOOKUP_CACHE: dict = {}
+LOOKUP_TTL_SECONDS = 60
+
+
+def _cached(cache_key: str):
+    hit = _LOOKUP_CACHE.get(cache_key)
+    if hit and time.monotonic() - hit[0] < LOOKUP_TTL_SECONDS:
+        return hit[1]
+    return None
+
+
+def _remember(cache_key: str, user_id: str) -> str:
+    _LOOKUP_CACHE[cache_key] = (time.monotonic(), user_id)
+    return user_id
 
 
 def _identity_key(issuer: str, subject: str) -> str:
@@ -187,6 +226,7 @@ def _create_user(registry: dict, **fields) -> str:
     return user_id
 
 
+@retry_on_conflict
 def resolve_handle(handle, allow_create: bool = True) -> str:
     """Map a handle to its user_id, registering it the first time.
 
@@ -199,20 +239,26 @@ def resolve_handle(handle, allow_create: bool = True) -> str:
     to conjure an account.
     """
     normalised = normalise_handle(handle)
+    cache_key = f"h:{normalised}"
 
-    registry = _load()
+    cached = _cached(cache_key)
+    if cached:
+        return cached
+
+    registry, version = _load_versioned()
     existing = registry["handles"].get(normalised)
     if existing:
-        return existing
+        return _remember(cache_key, existing)
 
     if not allow_create:
         raise KeyError(f"No account registered for handle '{normalised}'.")
 
     user_id = _create_user(registry, handle=normalised)
-    _save(registry)
-    return user_id
+    _save(registry, version)
+    return _remember(cache_key, user_id)
 
 
+@retry_on_conflict
 def resolve_identity(issuer: str, subject: str, email=None,
                      email_verified: bool = False) -> str:
     """Map an OAuth (issuer, sub) to a user_id, provisioning on first sight.
@@ -225,13 +271,19 @@ def resolve_identity(issuer: str, subject: str, email=None,
     if not issuer or not subject:
         raise ValueError("Both issuer and subject are required.")
 
-    registry = _load()
     key = _identity_key(issuer, subject)
+    cache_key = f"i:{key}"
+
+    cached = _cached(cache_key)
+    if cached:
+        return cached
+
+    registry, version = _load_versioned()
 
     # 1. This exact identity has been seen before.
     existing = registry["identities"].get(key)
     if existing:
-        return existing
+        return _remember(cache_key, existing)
 
     # 2. A different identity, but a verified email we already know. This is
     #    the person who signed up with Google and later added GitHub -- they
@@ -247,8 +299,8 @@ def resolve_identity(issuer: str, subject: str, email=None,
                 "user_id": linked, "created": _now(), "auth": "oauth"})
             record.setdefault("links", []).append(
                 {"issuer": issuer, "sub": subject})
-            _save(registry)
-            return linked
+            _save(registry, version)
+            return _remember(cache_key, linked)
 
     # 3. Genuinely new person.
     user_id = _create_user(registry, auth="oauth", email=None)
@@ -262,8 +314,8 @@ def resolve_identity(issuer: str, subject: str, email=None,
         registry["emails"][email.strip().lower()] = user_id
         registry["users"][user_id]["email"] = email
 
-    _save(registry)
-    return user_id
+    _save(registry, version)
+    return _remember(cache_key, user_id)
 
 
 def lookup_handle(handle):
@@ -275,24 +327,44 @@ def lookup_handle(handle):
     return _load()["handles"].get(normalised)
 
 
-def link_identity(user_id: str, issuer: str, subject: str):
-    """Attach an additional OAuth identity to an existing account."""
+@retry_on_conflict
+def link_identity(user_id: str, issuer: str, subject: str,
+                  repoint: bool = False):
+    """Attach an additional OAuth identity to an existing account.
+
+    This is how a bearer-token account and an OAuth login become one person:
+    the two paths otherwise mint separate user_ids, so data written with a
+    token is invisible after signing in through a client.
+
+    An identity that already resolves to a different account is refused
+    unless `repoint` is set. Repointing moves the login only -- the other
+    account's data stays where it is, under its own user_id, and is no longer
+    reachable through this identity.
+    """
     if not is_user_id(user_id):
         raise ValueError(f"Not a valid user id: {user_id!r}")
 
-    registry = _load()
+    registry, version = _load_versioned()
     if user_id not in registry["users"]:
         raise KeyError(f"Unknown user id: {user_id}")
 
     key = _identity_key(issuer, subject)
+    link = {"issuer": issuer, "sub": subject}
     claimed = registry["identities"].get(key)
     if claimed and claimed != user_id:
-        raise ValueError(
-            "That identity is already linked to a different account.")
+        if not repoint:
+            raise ValueError(
+                "That identity is already linked to a different account "
+                f"({claimed}).")
+        previous = registry["users"].get(claimed, {})
+        previous["links"] = [l for l in previous.get("links", [])
+                             if l != link]
 
     registry["identities"][key] = user_id
     links = registry["users"][user_id].setdefault("links", [])
-    if {"issuer": issuer, "sub": subject} not in links:
-        links.append({"issuer": issuer, "sub": subject})
-    _save(registry)
+    if link not in links:
+        links.append(link)
+    _save(registry, version)
+    # The cached answer for this identity may be the account it just left.
+    _LOOKUP_CACHE.pop(f"i:{key}", None)
     return user_id
