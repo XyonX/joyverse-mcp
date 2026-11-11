@@ -40,6 +40,11 @@ Only these {count} tools exist. Never invent another name.
 | Inferred traits, patterns, preferences, current context | memory | `get_memory` / `add_memory_trait` / `add_observed_pattern` / `update_preference` / `update_context` |
 | Growing logs by subject: dsa, projects, reading, ... | data topics | `get_data` / `list_topics` / `edit_data` |
 
+Do not know where something is, or when it happened? `search` looks through
+all of it by content -- use it before guessing a date or a topic name.
+`whoami` tells you which account this is, whether you may write, the name
+the server knows you by, and today's date for this person.
+
 Profile and memory are small and change often. The bio is a narrative -- read
 it when you need background, write it rarely. Data topics are the ones that
 accumulate over time.
@@ -58,16 +63,25 @@ accumulate over time.
   you omit is deleted -- it refuses to drop keys unless you pass
   `allow_drop`, so if it went through, that was deliberate. If a write to a
   data log went wrong, `restore_data` brings back the version it replaced.
+- **Deleting is for when the user asks.** `delete_data`,
+  `delete_profile_field`, `delete_bio_section`, `delete_memory_item` and
+  `delete_log_entry` each remove one thing. Confirm with the user first.
+  Profile, bio and memory keep their last few versions
+  (`list_history` / `restore_version`); a deleted topic comes back with
+  `restore_data`; a deleted file does not come back.
 - **Address items by matching a field, never by array index.** Indices shift
   the moment anything is added or removed, so `projects[3]` can be a
   different project tomorrow. Match on something like
   `{{"name": "OmniHome"}}` instead.
-- **Claim a client name once, then reuse it.** Call `list_clients` first; if
-  your name is already there, use it. A second name splits your files across
-  folders nobody expects. Use the plain product name (`chatgpt`, `claude`,
-  `hermes`) and keep it stable -- the name identifies the assistant you are,
-  never the project you are working on. You only need to register in order to
-  WRITE -- reading another client's file just needs its name.
+- **Let the server name you.** It usually knows which assistant is calling:
+  `list_clients` returns it as `you_are`, and when that is set you leave the
+  `client` argument out of every tool. Only if `you_are` is empty do you pass
+  a name -- reuse one already in the list, because a
+  second name splits your files across folders nobody expects. Use the plain
+  product name (`chatgpt`,
+  `claude`, `hermes`) or your agent name, and keep it stable -- the name
+  identifies the assistant you are, never the project you are working on.
+  Reading another client's file just needs its name.
 - **Never fabricate.** If you were not given real information, record that it
   is empty rather than inventing plausible values. Every profile and bio fact
   must come from the user.
@@ -86,7 +100,7 @@ saves an image, another fetches it.
 | Text you just wrote | `save_file_text` |
 | A public https:// URL | `save_file_from_url` |
 | Bytes already in context (an attachment, something you generated) | `save_file_base64` |
-| Something large with no URL | host it publicly, then `save_file_from_url` |
+| Something large with no URL | `request_upload`, or host it publicly, then `save_file_from_url` |
 
 The file tools take a `path` inside your client's folder -- sub-folders like
 `images/` or `renders/` are yours to organise. That is the one place a path
@@ -94,12 +108,27 @@ is correct: for data tools you name a *topic* and the server decides where
 it lives.
 
 `save_file_base64` is capped at 8 MB and those bytes are charged to your
-context window, so prefer a URL for anything substantial.
+context window, so prefer a URL for anything substantial. If you can make
+HTTP requests yourself, `request_upload` gives you a link to PUT a large
+local file straight to storage; call `complete_upload` afterwards.
 
-## Logging work
+## Two logs: the user's, and yours
 
-Log before you finish a conversation that did real work. One entry per
-meaningful piece of work, not per tool call.
+**The user's log (`add_to_log`, `get_log`, `list_log_days`) is about what the
+USER did** -- practised DSA, worked on a project, shipped something. It is
+what they read when they ask "what have I been doing", so it must stay short
+and be about them. Log there when the conversation involved something the
+user did or decided, one entry per meaningful thing, not per tool call.
+
+**Your own journal (`add_to_agent_log`, `get_agent_log`) is your log book.**
+Anything about YOUR work goes there: routing or monitoring ticks, status
+sweeps, what you tried, notes for your next session, handoffs. It lives in
+your own storage folder under `journal/` and never appears in the user's log.
+If you run on a schedule or keep a running record, that record is a journal.
+
+The server enforces the line: an `add_to_log` entry tagged as bookkeeping
+(tick, route, digest, monitor...), or one of many from the same agent in a
+day, is filed in your journal instead and the reply says so.
 
 Only the `summary` is read back later, so make it specific about both what
 was done and what it was about -- "fixed the FlexyGrid pricing table
@@ -111,7 +140,9 @@ under the same name you use for file storage. It is never the project, brand
 or person the work was about; that is what `tags` are for.
 
 To read: no arguments gives the last 24 hours; `date` gives one whole day;
-`since`/`until` gives a range. Call `list_log_days` rather than guessing a
+`since`/`until` gives a range. Dates are the user's own calendar days once
+their profile has a `timezone` (set it with `update_profile`); until then
+they are UTC. Call `list_log_days` rather than guessing a
 date. Check `has_more` -- if it is true you are looking at a truncated view,
 so widen the window or raise `limit`.
 
@@ -129,6 +160,17 @@ subjects they actually mentioned.
 _DESTRUCTIVE = {"replace_data", "delete_file"}
 
 
+def _is_destructive(server, name: str) -> bool:
+    """A tool is flagged when it is annotated destructive, or listed above."""
+    if name in _DESTRUCTIVE:
+        return True
+    for schema in getattr(server, "_tool_schemas", None) or []:
+        if getattr(schema, "name", None) == name:
+            return bool((getattr(schema, "annotations", None) or {})
+                        .get("destructiveHint"))
+    return False
+
+
 def _tool_lines(server):
     """Build the tool list from the live registry.
 
@@ -140,7 +182,8 @@ def _tool_lines(server):
     if not funcs:
         return ["- (no tools registered)"]
     return [
-        f"- `{name}`" + (" **DESTRUCTIVE**" if name in _DESTRUCTIVE else "")
+        f"- `{name}`" + (" **DESTRUCTIVE**"
+                         if _is_destructive(server, name) else "")
         for name in funcs
     ]
 

@@ -60,9 +60,14 @@ def update_bio(section: str, content: str, user: dict) -> str:
 
     # Find the header and the extent of its block
     start = None
+    # Matched case-insensitively, keeping the spelling already there, so
+    # "journey" replaces "## Journey" instead of adding a second section.
     for i, line in enumerate(lines):
-        if line.strip() == header:
+        stripped = line.strip()
+        if stripped.startswith("## ") and \
+                stripped[3:].strip().lower() == section.lower():
             start = i
+            header = stripped
             break
 
     if start is None:
@@ -96,8 +101,66 @@ def update_bio(section: str, content: str, user: dict) -> str:
     try:
         put_versioned(r2_client, BUCKET_NAME, key, body, version,
                       ContentType="text/markdown")
-        return f"{action} ({len(content)} chars)"
     except Conflict:
         raise
     except Exception as e:
         return f"Error writing to R2: {str(e)}"
+    from joyverse import history
+    history.keep(user_id, "bio", raw)
+    return f"{action} ({len(content)} chars)"
+
+
+@retry_on_conflict
+def delete_bio_section(section: str, user: dict = None) -> str:
+    """Remove one `## Section` from the bio, heading and body.
+
+    The version before the removal is kept (see restore_version).
+    """
+    from joyverse import history
+
+    user_id = user["user_id"]
+    try:
+        key = get_bio_key(user_id)
+    except ValueError as e:
+        return json.dumps({"error": f"Invalid user_id: {e}"})
+    name = str(section or "").lstrip("#").strip()
+    if not name:
+        return json.dumps({"error": "section is required."})
+
+    try:
+        raw, version = get_versioned(r2_client, BUCKET_NAME, key)
+    except Exception as e:
+        return json.dumps({"error": f"R2 error: {e}"})
+    if raw is None:
+        return json.dumps({"error": "There is no bio yet."})
+    lines = raw.decode("utf-8").split("\n")
+
+    def is_header(line):
+        return line.strip().startswith("## ")
+
+    start = next((i for i, line in enumerate(lines) if is_header(line)
+                  and line.strip()[3:].strip().lower() == name.lower()), None)
+    if start is None:
+        return json.dumps({
+            "error": f"The bio has no section named {name!r}.",
+            "sections": [line.strip()[3:].strip() for line in lines
+                         if is_header(line)]})
+    end = next((j for j in range(start + 1, len(lines))
+                if is_header(lines[j])), len(lines))
+    removed = lines[start].strip()[3:].strip()
+    lines = lines[:start] + lines[end:]
+    while lines and not lines[-1].strip():
+        lines.pop()
+
+    try:
+        put_versioned(r2_client, BUCKET_NAME, key,
+                      "\n".join(lines).encode("utf-8"), version,
+                      ContentType="text/markdown")
+    except Conflict:
+        raise
+    except Exception as e:
+        return json.dumps({"error": f"Error writing to R2: {e}"})
+    history.keep(user_id, "bio", raw)
+    return json.dumps({"ok": True, "deleted": {"section": removed,
+                                               "lines_removed": end - start},
+                       "undo": "restore_version(document=\"bio\")"})

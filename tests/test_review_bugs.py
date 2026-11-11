@@ -440,6 +440,9 @@ class TestLogs:
                                       user=TEST_USER))
         assert {e["summary"] for e in out["entries"]} == {"spring", "summer"}
         assert out["days_read"] == ["2026-03-10", "2026-08-02"]
+        # Only day objects are counted: the profile is also read once, for
+        # the user's timezone.
+        reads = [key for key in reads if "/logs/" in key]
         assert len(reads) == 2, f"read {len(reads)} objects for 2 days"
 
     def test_negative_limit_does_not_slice_from_the_end(self, fake_r2):

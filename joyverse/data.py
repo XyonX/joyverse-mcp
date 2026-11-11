@@ -55,7 +55,9 @@ def _describe(raw: str) -> str:
         return ""
     if not isinstance(parsed, dict):
         return ""
-    for field in ("description", "summary"):
+    # `purpose` is what agent-seeded topics use; without it over half the
+    # catalogue listed with a blank description.
+    for field in ("description", "summary", "purpose"):
         value = parsed.get(field)
         if isinstance(value, str) and value.strip():
             return value.strip()
@@ -706,3 +708,37 @@ def replace_data(topic: str, data: str, allow_drop: bool = False,
         raise
     except Exception as e:
         return f"Error writing to R2: {str(e)}"
+
+
+def delete_data(topic: str, user: dict = None) -> str:
+    """Delete a whole data topic.
+
+    The deleted log is kept as the topic's previous version, so
+    restore_data(topic) brings it back -- until a new log is written under
+    the same name, which replaces that copy.
+    """
+    user_id = user["user_id"]
+    try:
+        key = get_data_key(user_id, topic)
+    except ValueError as e:
+        return json.dumps({"error": f"Invalid topic: {e}"})
+    try:
+        raw, _ = get_versioned(r2_client, BUCKET_NAME, key)
+    except Exception as e:
+        return json.dumps({"error": f"R2 error: {e}"})
+    if raw is None:
+        return _miss(user_id, topic)
+
+    # Not the best-effort _snapshot: without the copy the delete has no
+    # undo, so a failed copy stops the delete.
+    try:
+        r2_client.put_object(Bucket=BUCKET_NAME,
+                             Key=_previous_key(user_id, topic), Body=raw,
+                             ContentType="application/json")
+        r2_client.delete_object(Bucket=BUCKET_NAME, Key=key)
+    except Exception as e:
+        return json.dumps({"error": f"Could not delete: {e}"})
+    return json.dumps({
+        "ok": True, "deleted": topic, "size_bytes": len(raw),
+        "undo": f"restore_data(topic=\"{topic}\") brings it back.",
+    })

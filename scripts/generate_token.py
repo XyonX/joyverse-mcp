@@ -14,6 +14,9 @@ Then give the printed token to your client as:
 # ============================================================
 
 HANDLE = "joydip"               # -> your user_id, e.g. u_8f3a91c7e4b2
+AGENT = ""                       # optional: the agent this token is for, e.g.
+                                 # "atlas". The server then knows who is
+                                 # calling without the model naming itself.
 EXPIRES_IN_HOURS = 24 * 7        # 168 = 7 days. Use 1 for short-lived tokens.
 ALGORITHM = "HS256"              # must match the server in joyverse/auth.py
 
@@ -27,6 +30,7 @@ JWT_SECRET_OVERRIDE = ""
 # ============================================================
 
 import os
+import secrets
 import sys
 import time
 from datetime import datetime, timezone
@@ -98,7 +102,12 @@ def main() -> int:
         "handle": handle,
         "iat": now,
         "exp": expires_at,
+        # An id of its own, so this one token can be retired with
+        # scripts/revoke_token.py without affecting any other.
+        "jti": secrets.token_hex(8),
     }
+    if AGENT.strip():
+        payload["agent"] = AGENT.strip().lower()
 
     token = jwt.encode(payload, secret, algorithm=ALGORITHM)
 
@@ -111,6 +120,7 @@ def main() -> int:
     print(f"Expires   : {datetime.fromtimestamp(expires_at, timezone.utc)} UTC")
     print(f"          (in {EXPIRES_IN_HOURS} hours)")
     print(f"Secret    : {source}")
+    print(f"Token id  : {payload['jti']}  (revoke with scripts/revoke_token.py)")
     print()
     print("--- TOKEN ---")
     print(token)

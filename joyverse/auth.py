@@ -139,6 +139,13 @@ def jwt_auth(request: Request) -> Dict:
     except ValueError as e:
         raise HTTPException(status_code=401, detail=f"Invalid handle: {e}")
 
+    # After the signature and expiry checks, so the revocation list is only
+    # consulted for tokens that would otherwise be accepted.
+    from joyverse import revocation
+
+    if revocation.is_revoked(payload, identity.normalise_handle(handle)):
+        raise HTTPException(status_code=401, detail="Token revoked")
+
     # Self-issued tokens carry both scopes when they say nothing about scope
     # -- these tokens are minted for our own operator. A `scope` claim that is
     # PRESENT is authoritative, including an empty one: a token narrowed to
@@ -149,9 +156,40 @@ def jwt_auth(request: Request) -> Dict:
 
         scopes = parse_scopes(payload["scope"])
 
-    return {
+    context = {
         "user_id": user_id,
         "handle": identity.normalise_handle(handle),
         "scopes": scopes,
         "auth_method": "bearer",
     }
+    # A token minted for one named agent says so, which lets that agent be
+    # identified without relying on the model to name itself.
+    if isinstance(payload.get("agent"), str) and payload["agent"].strip():
+        context["agent"] = payload["agent"].strip()
+    return context
+
+
+def with_client(strategy):
+    """Wrap an auth strategy so the context also says which agent is calling.
+
+    Adds `client` (the name) and `client_source` (where it was read from) when
+    the connection identifies the caller; see joyverse.clients. Tools use it
+    as the default for their `client` argument.
+    """
+    from joyverse import clients
+
+    def dependency(request: Request) -> Dict:
+        context = strategy(request)
+        # Counted per account once the caller is known, so one runaway agent
+        # cannot slow anyone else down.
+        from joyverse import ratelimit
+
+        ratelimit.check(context.get("user_id"),
+                        jv_config.RATE_LIMIT_PER_MINUTE)
+        name, source = clients.detect(request, context)
+        if name:
+            context["client"] = name
+            context["client_source"] = source
+        return context
+
+    return dependency

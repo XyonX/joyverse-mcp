@@ -5,21 +5,32 @@ from joyverse.config import (
     READ_SCOPE, WRITE_SCOPE, SUPPORTED_SCOPES, resource_url,
 )
 from joyverse import config as jv_config
-from joyverse.profile import get_profile, update_profile
-from joyverse.bio import get_bio, update_bio
+from joyverse.profile import get_profile, update_profile, delete_profile_field
+from joyverse.bio import get_bio, update_bio, delete_bio_section
 from joyverse.memory import (
     get_memory, add_memory_trait, update_focus, add_observed_pattern,
-    update_preference, update_context,
+    update_preference, update_context, delete_memory_item,
 )
 from joyverse.data import (
-    get_data, list_topics, edit_data, replace_data, restore_data,
+    get_data, list_topics, edit_data, replace_data, restore_data, delete_data,
 )
+from joyverse.search import search
+from joyverse.account import whoami, export_account
+from joyverse.audit import get_audit_log
+from joyverse import audit as jv_audit
+from joyverse import prompt_library
+from joyverse.history import list_history, restore_version
 from joyverse.storage import (
     register_client, list_clients, save_file_from_url, save_file_text,
     get_file, list_files, delete_file,
 )
-from joyverse.uploads import save_file_base64
-from joyverse.logs import add_to_log, get_log, list_log_days
+from joyverse.uploads import (
+    save_file_base64, request_upload, complete_upload,
+)
+from joyverse.logs import (
+    add_to_log, get_log, list_log_days, add_to_agent_log, get_agent_log,
+    delete_log_entry,
+)
 from joyverse.prompts import build_instructions
 from joyverse import auth as jv_auth
 
@@ -39,7 +50,10 @@ def build_auth():
 
     # One strategy is still wrapped, so the auth_method tagging and the
     # "first error wins" behaviour are identical in both configurations.
-    return any_auth(*strategies)
+    #
+    # with_client adds which agent is calling, read from the connection, so
+    # tools do not depend on the model knowing its own name.
+    return jv_auth.with_client(any_auth(*strategies))
 
 
 def build_discovery_routes():
@@ -82,17 +96,85 @@ server = MCPServer(
     max_body_bytes=jv_config.MAX_REQUEST_BYTES,
 )
 
+# Orientation
+server.tool(description=(
+    "Who is calling: the account, whether you may write, the client name the "
+    "server knows you by (`you_are`), the user's timezone and today's date "
+    "for them, and a count of what is stored. Call it once at the start of a "
+    "session instead of guessing your own name or the date."),
+    scopes=[READ_SCOPE])(whoami)
+
+server.tool(description=(
+    "Build a zip of everything written about the user -- profile, bio, "
+    "memory, every data topic, the whole log, agents' journals -- and return "
+    "a download link that lasts an hour. Use it when the user asks for a "
+    "copy or backup of their data. Stored files are listed inside the zip "
+    "rather than copied into it; fetch those with get_file."),
+    scopes=[WRITE_SCOPE],
+    param_docs={"include_history": "Also include the earlier versions kept "
+                                   "for undo. Leave out normally."})(
+        export_account)
+
+server.tool(description=(
+    "The record of every change made to this account: when, which tool, "
+    "which agent, and what it was aimed at -- written by the server, not by "
+    "the agents. Use it to answer 'who changed this' or 'what did the agents "
+    "do today'. Same windowing as get_log; pass tool to see one tool's "
+    "calls. It never contains the content that was written."),
+    scopes=[READ_SCOPE])(get_audit_log)
+
+server.tool(description=(
+    "Find something by content when you do not know where or when it was "
+    "stored. Searches the user's log, data topics, profile, bio, memory and "
+    "file names for the words in `query` (every word must appear; if nothing "
+    "has them all, entries with any of them are returned and the reply says "
+    "so). Use this BEFORE guessing a date for get_log or a topic for "
+    "get_data. Narrow with where (log, data, profile, bio, memory, files, "
+    "journals) and, for the log, since/until dates. Agents' journals are "
+    "searched only when where includes \"journals\" or is \"all\"."),
+    scopes=[READ_SCOPE],
+    param_docs={
+        "query": "A word or short phrase, e.g. 'pricing page' or 'graphs'.",
+        "where": "Areas to search. Leave out for everything except journals.",
+        "since": "Only log entries on or after this date (YYYY-MM-DD).",
+        "until": "Only log entries on or before this date (YYYY-MM-DD).",
+    })(search)
+
 # Profile
 server.tool(description="Get the user's personal profile",
             scopes=[READ_SCOPE])(get_profile)
 server.tool(description="Update a field in the user profile",
             scopes=[WRITE_SCOPE])(update_profile)
 
+server.tool(description=(
+    "DESTRUCTIVE: remove one `key: value` line or one whole `## Section` "
+    "from the profile. Only when the user asks for it to be removed. The "
+    "version before the removal is kept; restore_version brings it back."),
+    scopes=[WRITE_SCOPE])(delete_profile_field)
+
 # Bio
 server.tool(description="Get the user's detailed life narrative",
             scopes=[READ_SCOPE])(get_bio)
 server.tool(description="Write or replace a section of the user's bio",
             scopes=[WRITE_SCOPE])(update_bio)
+
+server.tool(description=(
+    "DESTRUCTIVE: remove one `## Section` of the bio, heading and body. Only "
+    "when the user asks. The version before the removal is kept; "
+    "restore_version brings it back."),
+    scopes=[WRITE_SCOPE])(delete_bio_section)
+
+# History for the three whole-document stores. Data topics have restore_data.
+server.tool(description=(
+    "List the earlier versions kept for a document: profile, bio or memory. "
+    "One is kept every time the document changes, the newest ten."),
+    scopes=[READ_SCOPE])(list_history)
+server.tool(description=(
+    "Undo a change to the profile, bio or memory by bringing back an earlier "
+    "version -- the most recent one unless you pass a `version` from "
+    "list_history. The version it replaces is kept too, so this can itself "
+    "be undone. For a data topic use restore_data instead."),
+    scopes=[WRITE_SCOPE])(restore_version)
 
 # Memory
 server.tool(description="Get the user's LLM memory model",
@@ -114,6 +196,13 @@ server.tool(description=(
     "Update the user's current context. field is one of main_focus, "
     "immediate_next (the next concrete step), mood."),
     scopes=[WRITE_SCOPE])(update_context)
+
+server.tool(description=(
+    "DESTRUCTIVE: remove one personality trait or observed pattern from "
+    "memory -- one that is wrong or no longer true. kind is 'trait' or "
+    "'pattern'; text is the entry, or enough of it to identify exactly one. "
+    "restore_version(document='memory') undoes it."),
+    scopes=[WRITE_SCOPE])(delete_memory_item)
 
 # Data Logs
 server.tool(description="Get structured data logs by topic (e.g., dsa, projects)",
@@ -152,6 +241,13 @@ server.tool(description=(
     "One level of undo: calling it again redoes the change."),
     scopes=[WRITE_SCOPE])(restore_data)
 
+server.tool(description=(
+    "DESTRUCTIVE: delete a whole data topic. Only when the user asks for the "
+    "topic to be removed -- to remove one item inside a topic use edit_data "
+    "with op=remove. The deleted log is kept as the topic's previous "
+    "version, so restore_data(topic) brings it back."),
+    scopes=[WRITE_SCOPE])(delete_data)
+
 
 # ==========================================
 # FILES
@@ -162,16 +258,19 @@ server.tool(description=(
 # ==========================================
 
 server.tool(description=(
-    "Claim a client name so you can save and fetch files. Call list_clients "
-    "FIRST: if your name is already registered, reuse it instead of "
-    "registering again -- a second name splits your files across folders. Use "
-    "the plain product name (chatgpt, claude, hermes) and keep it stable "
-    "across sessions. You only need this to WRITE files; reading another "
-    "client's file just needs its name."),
+    "Claim a client name. You rarely need this: the server usually knows "
+    "which assistant is calling and registers it on first use -- call "
+    "list_clients and check `you_are`. Register only when `you_are` is empty. "
+    "If your name is already registered, reuse it instead of registering "
+    "again -- a second name splits your files across folders. Use the plain "
+    "product name (chatgpt, claude, hermes) and keep it stable across "
+    "sessions."),
     scopes=[WRITE_SCOPE])(register_client)
 
 server.tool(description=(
-    "List the client names you have registered, with their storage folders."),
+    "List the client names in use, with their storage folders. `you_are` is "
+    "the one the server already knows you to be -- when it is set you can "
+    "leave the client argument out of every other tool."),
     scopes=[READ_SCOPE])(list_clients)
 
 server.tool(description=(
@@ -197,33 +296,83 @@ server.tool(description=(
     "for anything large host it publicly and use save_file_from_url."),
     scopes=[WRITE_SCOPE])(save_file_base64)
 
-# `client` is the one argument a model guesses wrong: in an agency-style
-# conversation ("work for the NextBiz Studio brand") the word reads as "who
-# the work is for", and the project name went into the field while the
-# assistant's own identity never appeared. The description says what the
-# field is, and the per-parameter doc -- the part a model reads when picking
-# argument values -- repeats it where the decision is actually made.
 server.tool(description=(
-    "Record one thing that happened, so a later conversation can recall it. "
-    "Call this before you finish a conversation that did real work -- the "
-    "summary is the only part anyone reads back, so make it specific: say what "
-    "was done AND what it was about. 'Fixed FlexyGrid pricing table overflow' "
-    "is useful; 'worked on frontend' is not. Add tags so it can be found later, "
-    "and include any files you stored. client is YOUR own name as an "
-    "assistant (chatgpt, claude, hermes...), never the project or brand the "
-    "work was about -- that goes in tags."),
+    "Get a link to upload a LARGE file straight to storage, for a file that "
+    "is too big for save_file_base64 and has no public URL for "
+    "save_file_from_url -- typically something on your own machine. You (or "
+    "a script you run) send the file with an HTTP PUT to the returned url, "
+    "using exactly the Content-Type shown, then call complete_upload. "
+    "size_bytes is the file's exact size. Only useful if you can make HTTP "
+    "requests yourself; a chat-only assistant cannot use the link."),
     scopes=[WRITE_SCOPE],
     param_docs={
-        "client": "Your own product name as the assistant doing the work "
-                  "(chatgpt, claude, hermes...), the same name you use for "
-                  "file storage. NOT the project, brand or person the work "
-                  "is about -- put that in tags instead. Call list_clients "
-                  "and reuse your exact existing name.",
-    })(add_to_log)
+        "path": "Where to store it inside your client folder, e.g. "
+                "renders/final.mp4.",
+        "size_bytes": "The file's exact size in bytes.",
+        "mime_type": "e.g. video/mp4. Must be sent as Content-Type on the "
+                     "PUT.",
+        "overwrite": "true to replace a file already at that path.",
+    })(request_upload)
 
 server.tool(description=(
-    "Read back what was logged. With no arguments, returns the last 24 hours -- "
-    "use that for 'what have we been doing'. Pass date for one whole day, or "
+    "Finish an upload started with request_upload: confirms the file "
+    "arrived and matches the size declared. Call it after the PUT succeeds. "
+    "A file larger than declared, or over the storage limit, is removed."),
+    scopes=[WRITE_SCOPE])(complete_upload)
+
+# The user's log and the agents' journals are separate on purpose: the log
+# answers "what have I been doing", and an autonomous agent ticking every few
+# minutes used to write almost all of it. The descriptions draw the line, and
+# add_to_log also enforces it by filing operational entries in the caller's
+# journal.
+#
+# `client` used to be the argument a model guessed wrong -- it does not
+# reliably know its own name, and in an agency-style conversation the word
+# reads as "who the work is for". The server now works the name out from the
+# connection, so the argument is optional and described as an override.
+_CLIENT_DOC = (
+    "Usually leave this out: the server already knows which assistant is "
+    "calling. If you must set it, it is YOUR own name as the assistant "
+    "(chatgpt, claude, atlas...), exactly as list_clients shows it -- NOT the "
+    "project, brand or person the work is about; that goes in tags.")
+
+server.tool(description=(
+    "Record something the USER did, so a later conversation can recall it: "
+    "'practised graph problems', 'shipped the FlexyGrid pricing page'. This "
+    "is the user's own activity log, read back when they ask what they have "
+    "been doing -- so one entry per meaningful thing, written about THEM. Do "
+    "NOT use it for your own working notes, status checks, routing ticks or "
+    "anything about what you as an agent did: those go in add_to_agent_log. "
+    "Make the summary specific about what was done AND what it was about, "
+    "and add tags so it can be found later. client is YOUR own name as an "
+    "assistant, never the project or brand the work was about -- that goes "
+    "in tags."),
+    scopes=[WRITE_SCOPE],
+    param_docs={"client": _CLIENT_DOC})(add_to_log)
+
+server.tool(description=(
+    "Write a note in YOUR OWN journal -- the agent's log book. Use this for "
+    "anything about your work rather than the user's: a routing or "
+    "monitoring tick, a status sweep, what you tried, a handoff for your "
+    "next session. It is stored in your own storage folder under journal/ "
+    "and never appears in the user's log. Summaries can be long (4000 "
+    "characters)."),
+    scopes=[WRITE_SCOPE],
+    param_docs={"client": _CLIENT_DOC})(add_to_agent_log)
+
+server.tool(description=(
+    "Read an agent's journal -- yours by default. No arguments gives the "
+    "last 24 hours; pass date for one day or since/until for a range. Pass "
+    "client to read another agent's journal, which is how you pick up where "
+    "another agent left off."),
+    scopes=[READ_SCOPE],
+    param_docs={"client": "Whose journal to read. Leave out for your own."})(
+        get_agent_log)
+
+server.tool(description=(
+    "Read back the USER'S log -- what they did. With no arguments, returns the "
+    "last 24 hours -- use that for 'what have I been doing'. Agents' own "
+    "journals are separate; read those with get_agent_log. Pass date for one whole day, or "
     "since/until for a range such as 12pm-2pm; both accept a bare date "
     "(2026-10-01) or a full timestamp. Check has_more: if it is true you are "
     "seeing a truncated view, so widen the window or raise limit."),
@@ -234,6 +383,20 @@ server.tool(description=(
     "do not know whether something was logged -- it avoids guessing a date. "
     "Pass include_counts=true to also get how many entries each day holds."),
     scopes=[READ_SCOPE])(list_log_days)
+
+server.tool(description=(
+    "DESTRUCTIVE: remove one entry from the user's log -- a mistake, a "
+    "duplicate, or something they want forgotten. Pass ts exactly as get_log "
+    "returned it; if two entries share that timestamp, add match with a few "
+    "words from the summary. Set journal=true to remove from your own "
+    "journal instead. The removed entry is returned in the reply."),
+    scopes=[WRITE_SCOPE],
+    param_docs={
+        "ts": "The entry's timestamp, exactly as get_log returned it.",
+        "match": "Words from the summary, when several entries share ts.",
+        "journal": "true to remove from an agent journal, not the user's log.",
+        "client": "Whose journal. Leave out for your own.",
+    })(delete_log_entry)
 
 server.tool(description=(
     "Get a temporary download link for a file you stored earlier. The link is "
@@ -250,6 +413,89 @@ server.tool(description=(
     "DESTRUCTIVE: permanently deletes a stored file and frees its space. There "
     "is no undo and no trash -- confirm with the user first."),
     scopes=[WRITE_SCOPE])(delete_file)
+
+
+# ==========================================
+# TOOL ANNOTATIONS
+#
+# Hints a client uses to decide what to run freely and what to confirm with
+# the user. Assigned from one table rather than at each registration, and
+# every tool must appear in it: a new tool with no classification fails at
+# start-up instead of being silently advertised as "might do anything".
+#
+# "Destructive" here means it removes or overwrites something the caller did
+# not name piece by piece. The update_* and edit tools replace one value and
+# keep the version they replaced, so they are not marked.
+# ==========================================
+
+_READ_ONLY = {
+    "whoami", "search", "get_profile", "get_bio", "get_memory", "get_data",
+    "list_topics", "list_history", "list_clients", "get_log", "get_agent_log",
+    "list_log_days", "get_file", "list_files", "get_audit_log",
+}
+_ADDITIVE = {
+    "add_memory_trait", "add_observed_pattern", "add_to_log",
+    "add_to_agent_log", "register_client", "export_account",
+    "request_upload", "complete_upload",
+}
+_REPLACING = {
+    "update_profile", "update_bio", "update_focus", "update_preference",
+    "update_context", "edit_data", "restore_data", "restore_version",
+    "save_file_text", "save_file_base64", "save_file_from_url",
+}
+_DESTRUCTIVE = {
+    "replace_data", "delete_data", "delete_file", "delete_profile_field",
+    "delete_bio_section", "delete_memory_item", "delete_log_entry",
+}
+# Calling these twice with the same arguments leaves the same state.
+_IDEMPOTENT = (_REPLACING | _DESTRUCTIVE | {"register_client"}) - {
+    "edit_data", "restore_data", "restore_version"}
+# The only tool that reaches outside this server.
+_OPEN_WORLD = {"save_file_from_url"}
+
+
+def _annotate(tool_server):
+    unclassified = []
+    for schema in tool_server._tool_schemas:
+        name = schema.name
+        if name in _READ_ONLY:
+            hints = {"readOnlyHint": True}
+        elif name in _ADDITIVE | _REPLACING | _DESTRUCTIVE:
+            hints = {"readOnlyHint": False,
+                     "destructiveHint": name in _DESTRUCTIVE,
+                     "idempotentHint": name in _IDEMPOTENT}
+        else:
+            unclassified.append(name)
+            continue
+        hints["openWorldHint"] = name in _OPEN_WORLD
+        hints["title"] = name.replace("_", " ").capitalize()
+        schema.annotations = hints
+    if unclassified:
+        raise RuntimeError(
+            "Tools with no annotation class in run.py: "
+            + ", ".join(unclassified))
+
+
+_annotate(server)
+
+
+# ==========================================
+# AUDIT TRAIL
+#
+# Every call to a tool that can change something is recorded by the server
+# itself. Which tools count comes from the annotations above, so a new write
+# tool is audited without anyone remembering to add it.
+# ==========================================
+
+def _audit(tool_name, user, arguments, output, is_error):
+    if jv_config.AUDIT_ENABLED and tool_name not in _READ_ONLY:
+        jv_audit.record(user, tool_name, arguments, output, is_error)
+
+
+server.tool_observer = _audit
+
+# Prompts the user can pick from their client's menu.
+prompt_library.register(server)
 
 
 # ==========================================

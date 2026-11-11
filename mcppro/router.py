@@ -89,6 +89,8 @@ async def route_request(
     user_context: dict = None,
     tool_scopes: Dict[str, list] = None,
     resource_registry=None,
+    tool_observer=None,
+    prompts: Dict[str, dict] = None,
 ) -> AsyncGenerator[str, None]:
     """
     Routes a JSON-RPC method to the appropriate handler.
@@ -120,6 +122,8 @@ async def route_request(
         # resources only when the server actually implements them.
         if resource_registry is not None and resource_registry.has_any():
             capabilities["resources"] = {}
+        if prompts:
+            capabilities["prompts"] = {}
         result = {
             "protocolVersion": negotiate_version(
                 (params or {}).get("protocolVersion")),
@@ -152,7 +156,7 @@ async def route_request(
     # ==========================================
     elif method == "tools/list":
         result = {
-            "tools": [t.model_dump() for t in tool_schemas]
+            "tools": [t.model_dump(exclude_none=True) for t in tool_schemas]
         }
         payload = transport.build_jsonrpc_response(req_id, result)
         yield transport.format_sse(payload)
@@ -227,6 +231,18 @@ async def route_request(
                         content=[MCPContent(type="text", text=text)],
                         isError=True
                     )
+
+            # Told about every call that reached a real tool, after it ran.
+            # The application decides what to do with that (an audit trail);
+            # a failing observer never changes the caller's result.
+            if tool_observer is not None and func and not problem:
+                try:
+                    await _run(tool_observer, tool_name, user_context,
+                               dict(arguments or {}),
+                               result.content[0].text if result.content
+                               else "", result.isError)
+                except Exception:
+                    pass
 
             # exclude_none: a text block must not carry `"data": null` and
             # `"mimeType": null`, which strict clients reject.
@@ -315,6 +331,53 @@ async def route_request(
         }
         payload = transport.build_jsonrpc_response(req_id, result)
         yield transport.format_sse(payload)
+
+    # ==========================================
+    # F. PROMPTS
+    # ==========================================
+
+    elif method == "prompts/list":
+        listed = [{k: v for k, v in {
+            "name": name, "title": spec.get("title"),
+            "description": spec.get("description"),
+            "arguments": spec.get("arguments") or []}.items()
+            if v is not None} for name, spec in (prompts or {}).items()]
+        yield transport.format_sse(transport.build_jsonrpc_response(
+            req_id, {"prompts": listed}))
+
+    elif method == "prompts/get":
+        name = (params or {}).get("name")
+        spec = (prompts or {}).get(name)
+        given = (params or {}).get("arguments") or {}
+        if spec is None or not isinstance(given, dict):
+            yield transport.format_sse(transport.build_jsonrpc_error(
+                req_id, transport.JSONRPCError.INVALID_PARAMS,
+                f"Unknown prompt: {name}" if spec is None
+                else "arguments must be an object"))
+            return
+        declared = spec.get("arguments") or []
+        missing = [a["name"] for a in declared
+                   if a.get("required") and not given.get(a["name"])]
+        if missing:
+            yield transport.format_sse(transport.build_jsonrpc_error(
+                req_id, transport.JSONRPCError.INVALID_PARAMS,
+                "Missing required argument(s): " + ", ".join(missing)))
+            return
+        known = {a["name"] for a in declared}
+        try:
+            text = await _run(spec["func"], **{
+                k: str(v) for k, v in given.items() if k in known})
+        except Exception as e:
+            yield transport.format_sse(transport.build_jsonrpc_error(
+                req_id, transport.JSONRPCError.INTERNAL_ERROR,
+                f"Could not build prompt: {e}"))
+            return
+        result = {"messages": [{"role": "user", "content": {
+            "type": "text", "text": str(text)}}]}
+        if spec.get("description"):
+            result["description"] = spec["description"]
+        yield transport.format_sse(transport.build_jsonrpc_response(
+            req_id, result))
 
     # ==========================================
     # E. FALLBACK: Method Not Found

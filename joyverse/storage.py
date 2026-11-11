@@ -115,6 +115,74 @@ def _save_clients(user_id: str, data: dict, version=None):
                   ContentType="application/json")
 
 
+def _client_record(user_id: str, name: str, platform=None) -> dict:
+    # Opaque, derived from the name but not reversible into anything usable.
+    client_id = "c_" + hashlib.sha256(
+        f"{user_id}:{name}".encode()).hexdigest()[:12]
+    return {
+        "client_id": client_id,
+        "name": name,
+        "platform": platform,
+        "first_seen": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    }
+
+
+@retry_on_conflict
+def ensure_client(user_id: str, name: str, source: Optional[str] = None):
+    """Register `name` if it is not registered yet. Idempotent.
+
+    Called for an identity the SERVER worked out, so registering stops being
+    a step the model has to remember. A name the model supplied is never
+    auto-registered: that is how a project name became a client.
+    """
+    registry, version = _load_clients_versioned(user_id)
+    if name in registry["clients"]:
+        return
+    record = _client_record(user_id, name)
+    record["registered_by"] = f"auto:{source or 'connection'}"
+    registry["clients"][name] = record
+    _save_clients(user_id, registry, version)
+
+
+def pick_client(client, user: dict, register: bool = False) -> tuple:
+    """Decide which client a tool call acts as.
+
+    Returns (name, None), or (None, error payload). An explicit `client` is
+    folded onto the user's existing spelling of the same agent. Without one,
+    the agent the connection identified is used -- and registered on first
+    use when `register` is set, which the write tools do.
+    """
+    from joyverse import clients
+
+    user_id = user["user_id"]
+    try:
+        registered = _load_clients(user_id)["clients"]
+    except Exception:
+        # Fail open: the registry is a convenience for naming, and a hiccup
+        # reading it must not block a file operation.
+        registered = {}
+
+    if client:
+        return clients.canonical(client, registered), None
+
+    detected = (user or {}).get("client")
+    if not detected:
+        return None, {
+            "error": "client is required.",
+            "hint": "Pass your own assistant name as client (call "
+                    "list_clients to see the names already in use), or set "
+                    "the X-Joyverse-Agent header in this agent's MCP config "
+                    "so the server knows who is calling.",
+        }
+    name = clients.canonical(detected, registered)
+    if register and name not in registered:
+        try:
+            ensure_client(user_id, name, user.get("client_source"))
+        except Exception:
+            pass
+    return name, None
+
+
 @retry_on_conflict
 def register_client(name: str, platform: Optional[str] = None,
                     user: dict = None) -> str:
@@ -131,6 +199,11 @@ def register_client(name: str, platform: Optional[str] = None,
         return json.dumps({"error": f"Invalid client name: {e}"})
 
     registry, version = _load_clients_versioned(user_id)
+    # Fold onto a name this user already has for the same agent: registering
+    # "gpt" when "chatgpt" exists is the duplicate this tool must not create.
+    from joyverse import clients as _clients
+    requested = clean
+    clean = _clients.canonical(clean, registry["clients"])
     existing = registry["clients"].get(clean)
     if existing:
         return json.dumps({
@@ -147,31 +220,27 @@ def register_client(name: str, platform: Optional[str] = None,
                     "matching the product you are.",
         })
 
-    # Opaque, derived from the name but not reversible into anything usable.
-    client_id = "c_" + hashlib.sha256(
-        f"{user_id}:{clean}".encode()).hexdigest()[:12]
-
     # platform was stored verbatim, so the same product accumulated spellings
     # like "chatgpt", "ChatGPT" and "claude.ai". It is descriptive only and
     # never an identity, so folding it costs nothing.
     clean_platform = platform.strip().lower() if isinstance(platform, str) \
         and platform.strip() else None
 
-    registry["clients"][clean] = {
-        "client_id": client_id,
-        "name": clean,
-        "platform": clean_platform,
-        "first_seen": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-    }
+    record = _client_record(user_id, clean, clean_platform)
+    registry["clients"][clean] = record
     _save_clients(user_id, registry, version)
 
-    return json.dumps({
+    out = {
         "ok": True,
-        "client_id": client_id,
+        "client_id": record["client_id"],
         "name": clean,
         "platform": clean_platform,
         "storage_path": client_prefix(user_id, clean),
-    })
+    }
+    if clean != requested:
+        out["note"] = (f"'{requested}' is another spelling of '{clean}', so "
+                       f"you are registered as '{clean}'. Use that name.")
+    return json.dumps(out)
 
 
 def list_clients(user: dict) -> str:
@@ -180,11 +249,18 @@ def list_clients(user: dict) -> str:
     Takes the user from the token, never from a parameter, so one user cannot
     enumerate another's registrations by naming them.
     """
+    from joyverse import clients as _clients
+
     user_id = user["user_id"]
     clients = _load_clients(user_id)["clients"]
+    detected = (user or {}).get("client")
+    you_are = _clients.canonical(detected, clients) if detected else None
     for name, entry in list(clients.items()):
         clients[name] = dict(entry, storage_path=client_prefix(user_id, name))
     return json.dumps({
+        # Which of these the server already knows the caller to be. When it
+        # is set, the `client` argument can be left out everywhere.
+        "you_are": you_are,
         "clients": clients,
         "count": len(clients),
         "note": "Client names are yours alone. Another user may hold the same "
@@ -599,9 +675,9 @@ def save_file_from_url(url: str, path: str, client: str = None,
     from joyverse.config import r2_client
 
     user_id = user["user_id"]
-    if not client:
-        return json.dumps({"error": "client is required.",
-                           "hint": "Call register_client first."})
+    client, problem = pick_client(client, user, register=True)
+    if problem:
+        return json.dumps(problem)
     try:
         key, relative = resolve_file_path(user_id, client, path)
     except ValueError as e:
@@ -662,8 +738,9 @@ def save_file_text(path: str, content: str, client: str = None,
     from joyverse.config import r2_client
 
     user_id = user["user_id"]
-    if not client:
-        return json.dumps({"error": "client is required."})
+    client, problem = pick_client(client, user, register=True)
+    if problem:
+        return json.dumps(problem)
     try:
         key, relative = resolve_file_path(user_id, client, path)
     except ValueError as e:
@@ -707,8 +784,9 @@ def get_file(path: str, client: str = None, user: dict = None) -> str:
     from joyverse.config import r2_client
 
     user_id = user["user_id"]
-    if not client:
-        return json.dumps({"error": "client is required."})
+    client, problem = pick_client(client, user)
+    if problem:
+        return json.dumps(problem)
     try:
         key, relative = resolve_file_path(user_id, client, path)
     except ValueError as e:
@@ -759,6 +837,7 @@ def list_files(prefix: str = None, client: str = None, limit: int = None,
     root = storage_prefix(user_id)
     scan = root
     if client:
+        client, _ = pick_client(client, user)
         try:
             scan = client_prefix(user_id, client)
         except ValueError as e:
@@ -823,8 +902,9 @@ def delete_file(path: str, client: str = None, user: dict = None) -> str:
     from joyverse.config import r2_client
 
     user_id = user["user_id"]
-    if not client:
-        return json.dumps({"error": "client is required."})
+    client, problem = pick_client(client, user)
+    if problem:
+        return json.dumps(problem)
     try:
         key, relative = resolve_file_path(user_id, client, path)
     except ValueError as e:
